@@ -179,6 +179,12 @@ def hybrid_bar_chords(
             "time":       run[0]["time"],
         })
 
+        # A chord that only occupies the last beat is almost always an anticipation
+        # of the next bar — absorb it back into the preceding segment
+        if len(segments) > 1 and segments[-1]["beats"] == 1:
+            tail = segments.pop()
+            segments[-1] = {**segments[-1], "beats": segments[-1]["beats"] + 1}
+
         bars.append({
             "bar":        len(bars) + 1,
             "beat":       group[0]["beat"],
@@ -413,12 +419,14 @@ def main() -> None:
     print("\n  Chord summary (changes only):")
     prev = None
     for bar in bar_chords:
-        for k, seg in enumerate(bar["segments"]):
+        beat_pos = 1
+        for seg in bar["segments"]:
             if seg["chord"] != prev:
                 flag   = " ?" if seg["confidence"] < args.threshold else ""
-                prefix = f"Bar {bar['bar']:>3}" if k == 0 else f"      beat {k+1}"
+                prefix = f"Bar {bar['bar']:>3}" if beat_pos == 1 else f"      beat {beat_pos}"
                 print(f"    {prefix}  {seg['time']:>6.1f}s  {crema_to_display(seg['chord']):<8}  ({seg['confidence']:.0%}{flag})")
                 prev = seg["chord"]
+            beat_pos += seg["beats"]
 
     # Build subtitle
     key_stmt = _ly_key(args.key) if args.key != "auto" else guess_key(bar_chords)
