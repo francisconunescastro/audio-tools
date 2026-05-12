@@ -13,7 +13,7 @@ echo "╚═══════════════════════�
 
 # ── 1. System dependencies ──────────────────────────────────
 echo ""
-echo "[ 1 / 4 ]  System dependencies"
+echo "[ 1 / 5 ]  System dependencies"
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     if ! command -v brew &>/dev/null; then
@@ -39,14 +39,14 @@ fi
 
 # ── 2. System Python — beat stabilizer deps ─────────────────
 echo ""
-echo "[ 2 / 4 ]  Beat stabilizer dependencies (system Python)"
+echo "[ 2 / 5 ]  Beat stabilizer dependencies (system Python)"
 python3 -m pip install -r requirements.txt --break-system-packages 2>/dev/null \
     || python3 -m pip install -r requirements.txt
 echo "  ✓  Done"
 
 # ── 3. Create crema venv (Python 3.11) ──────────────────────
 echo ""
-echo "[ 3 / 4 ]  Creating crema virtual environment (Python 3.11) …"
+echo "[ 3 / 5 ]  Creating crema virtual environment (Python 3.11) …"
 python3.11 -m venv venv_crema
 ./venv_crema/bin/pip install --upgrade pip --quiet
 # setuptools<70 must come before crema to restore pkg_resources
@@ -56,7 +56,15 @@ echo "  ✓  venv_crema ready"
 
 # ── 4. Verify LilyPond ──────────────────────────────────────
 echo ""
-echo "[ 4 / 4 ]  Checking LilyPond …"
+echo "[ 4 / 5 ]  Creating demucs virtual environment (Python 3.11) …"
+python3.11 -m venv venv_demucs
+./venv_demucs/bin/pip install --upgrade pip --quiet
+./venv_demucs/bin/pip install -r requirements_demucs.txt
+echo "  ✓  venv_demucs ready"
+
+# ── 5. Verify LilyPond ──────────────────────────────────────
+echo ""
+echo "[ 5 / 5 ]  Checking LilyPond …"
 if ! command -v lilypond &>/dev/null; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "  Installing LilyPond via Homebrew …"
@@ -79,5 +87,6 @@ echo "║                                          ║"
 echo "║  Individual tools:                       ║"
 echo "║    python3 beat_stabilizer.py -i song.wav -o out.wav"
 echo "║    ./venv_crema/bin/python3.11 chord_chart_render.py -i out.wav"
+echo "║    ./venv_demucs/bin/python3.11 stem_splitter.py -i out.wav"
 echo "╚══════════════════════════════════════════╝"
 echo ""

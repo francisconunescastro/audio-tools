@@ -1,9 +1,10 @@
 # audio-tools
 
-Two tools that work together:
+Three tools that work together:
 
 1. **Beat Stabilizer** — warps audio so every beat locks to a perfect rhythmic grid (like Ableton's "Warp to grid")
 2. **Chord Chart** — detects chords using a neural network, aligns them to the beat grid, and renders a PDF lead sheet
+3. **Stem Splitter** — separates audio into up to 6 stems (vocals, drums, bass, guitar, piano, other) using Demucs
 
 ---
 
@@ -27,10 +28,11 @@ This installs:
 - `rubberband` and `ffmpeg` via Homebrew
 - Beat stabilizer Python deps into the system Python
 - A self-contained `venv_crema/` environment (Python 3.11 + crema + TensorFlow 2.x) for chord detection
+- A self-contained `venv_demucs/` environment (Python 3.11 + PyTorch + Demucs) for stem splitting
 - LilyPond for PDF rendering
 
-> **Why two Python versions?**
-> The chord detector uses `crema`, which depends on TensorFlow 2.x and an older scikit-learn — incompatible with Python 3.13+. The beat stabilizer works fine on the system Python. The `pipeline.py` script wires them together automatically.
+> **Why separate virtual environments?**
+> `crema` needs TensorFlow 2.x (incompatible with Python 3.13+), while Demucs needs PyTorch — they conflict with each other and with the system Python. Each tool runs in its own isolated environment; `pipeline.py` wires them together automatically.
 
 ---
 
@@ -42,14 +44,17 @@ This installs:
 python3 pipeline.py -i song.wav
 python3 pipeline.py -i song.wav --bpm 84 --title "My Song" --open
 python3 pipeline.py -i song.wav --strength 0.8 --key "bes:major" --open
+python3 pipeline.py -i song.wav --stems vocals,drums   # keep only two stems
+python3 pipeline.py -i song.wav --skip-stems           # skip stem splitting
 ```
 
-This runs both steps in sequence. The BPM is passed between steps automatically via a `.bpm` sidecar file — no need to repeat it.
+This runs all three steps in sequence. The BPM is passed between steps automatically via a `.bpm` sidecar file — no need to repeat it.
 
 **Output files** (written next to the input):
 - `song_stabilised.wav` — beat-locked audio
 - `song_stabilised.wav.bpm` — BPM sidecar (used internally)
 - `song_chord_chart.pdf` — the chord chart
+- `song_stems/` — folder containing one WAV per stem
 
 ### Beat stabilizer only
 
@@ -95,6 +100,26 @@ If you already have a stable file and just want the chord chart:
 python3 pipeline.py -i stable_song.wav --skip-stabilize --open
 ```
 
+### Stem splitter only
+
+```bash
+./venv_demucs/bin/python3.11 stem_splitter.py -i song.wav
+./venv_demucs/bin/python3.11 stem_splitter.py -i song.wav --stems vocals,drums
+./venv_demucs/bin/python3.11 stem_splitter.py -i song.wav --model htdemucs
+```
+
+| Flag | Description |
+|------|-------------|
+| `--stems` | Comma-separated stems to keep e.g. `vocals,drums` (default: all) |
+| `--model` | Demucs model: `htdemucs_6s` (default, 6 stems), `htdemucs` (4 stems, faster), `htdemucs_ft` (fine-tuned), `mdx_extra` |
+| `--output-dir` | Output folder (default: `<input>_stems/`) |
+
+> **Note:** On first run, Demucs downloads model weights (~80–320 MB). Subsequent runs use the cached weights.
+
+Available stems per model:
+- `htdemucs_6s` — vocals, drums, bass, guitar, piano, other
+- All other models — vocals, drums, bass, other
+
 ---
 
 ## Supported input formats
@@ -121,12 +146,15 @@ Low-confidence detections (below 45%) are flagged with `?` in the terminal outpu
 
 ```
 audio-tools/
-├── pipeline.py              # Full pipeline runner
+├── pipeline.py              # Full pipeline runner (all 3 steps)
 ├── beat_stabilizer.py       # Beat detection & time-warping
 ├── chord_sheet.py           # Chord detection & beat alignment (library)
 ├── chord_chart_render.py    # PDF chart generator
+├── stem_splitter.py         # Stem separation via Demucs
 ├── requirements.txt         # System Python deps (beat stabilizer)
 ├── requirements_crema.txt   # crema venv deps (chord tools)
+├── requirements_demucs.txt  # demucs venv deps (stem splitter)
 ├── setup.sh                 # One-time setup script
-└── venv_crema/              # Auto-created by setup.sh — do not commit
+├── venv_crema/              # Auto-created by setup.sh — do not commit
+└── venv_demucs/             # Auto-created by setup.sh — do not commit
 ```
