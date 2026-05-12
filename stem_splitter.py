@@ -16,7 +16,9 @@ On first run, Demucs downloads the model weights (~80–320 MB, cached afterward
 import argparse
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -33,31 +35,41 @@ def split(input_path: str, output_dir: str, model: str, wanted_stems: set[str] |
     Run Demucs separation and return list of output file paths.
     Files are moved out of Demucs's nested folder structure into output_dir directly.
     """
-    from demucs.api import Separator, save_audio
-    import torch
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"  Model : {model}  |  Device: {device}")
-    if device == "cpu":
-        print("  (No GPU found — running on CPU, this may take a few minutes)")
-
-    print(f"  Loading model … (first run downloads weights, subsequent runs are instant)")
-    separator = Separator(model, device=device)
-
-    print(f"  Separating …")
-    origin, separated = separator.separate_audio_file(Path(input_path))
-
     os.makedirs(output_dir, exist_ok=True)
-    written = []
 
-    for stem_name, audio in separated.items():
-        if wanted_stems and stem_name.lower() not in wanted_stems:
-            continue
-        out_path = os.path.join(output_dir, f"{stem_name}.wav")
-        save_audio(audio, Path(out_path), samplerate=separator.samplerate)
-        size_mb = os.path.getsize(out_path) / 1_000_000
-        print(f"  ✓  {stem_name:<10}  →  {out_path}  ({size_mb:.1f} MB)")
-        written.append(out_path)
+    with tempfile.TemporaryDirectory() as tmp:
+        cmd = [
+            sys.executable, "-m", "demucs",
+            "-n", model,
+            "-o", tmp,
+            input_path,
+        ]
+        print(f"  Model : {model}")
+        print(f"  Loading model … (first run downloads weights, subsequent runs are instant)")
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            sys.exit(f"Demucs failed (exit {result.returncode}).")
+
+        # Demucs outputs to: {tmp}/{model}/{track_name}/{stem}.wav
+        track_name = Path(input_path).stem
+        stems_dir = Path(tmp) / model / track_name
+        if not stems_dir.exists():
+            # Some models use a slightly different name — find it
+            candidates = list(Path(tmp).rglob("*.wav"))
+            if not candidates:
+                sys.exit("Demucs produced no output files.")
+            stems_dir = candidates[0].parent
+
+        written = []
+        for stem_file in sorted(stems_dir.glob("*.wav")):
+            stem_name = stem_file.stem
+            if wanted_stems and stem_name.lower() not in wanted_stems:
+                continue
+            dest = os.path.join(output_dir, f"{stem_name}.wav")
+            shutil.move(str(stem_file), dest)
+            size_mb = os.path.getsize(dest) / 1_000_000
+            print(f"  ✓  {stem_name:<10}  →  {dest}  ({size_mb:.1f} MB)")
+            written.append(dest)
 
     return written
 
