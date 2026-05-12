@@ -85,6 +85,23 @@ _QUALITY_DISPLAY = {
     "min6":    "m6",     "minmaj7": "mM7",
 }
 
+# Collapse extended/altered qualities down to plain major or minor
+_QUALITY_TO_SIMPLE = {
+    "maj": "maj",    "7": "maj",      "maj7": "maj",   "maj6": "maj",
+    "aug": "maj",    "sus2": "maj",   "sus4": "maj",
+    "min": "min",    "min7": "min",   "dim": "min",    "dim7": "min",
+    "hdim7": "min",  "min6": "min",   "minmaj7": "min",
+}
+
+
+def simplify_chord(label: str) -> str:
+    """Reduce any chord to plain major or minor (e.g. G:7 → G:maj, B:min7 → B:min)."""
+    if label in ("N", "X", ""):
+        return label
+    root, quality = label.split(":", 1) if ":" in label else (label, "maj")
+    base = _QUALITY_TO_SIMPLE.get(quality, "maj")
+    return f"{root}:min" if base == "min" else f"{root}:maj"
+
 
 def crema_to_ly(label: str) -> tuple[str, str]:
     if label in ("N", "X", ""):
@@ -109,26 +126,24 @@ def beats_to_bars(beat_chords: list[dict], beats_per_bar: int) -> list[list[dict
     return [beat_chords[i:i + beats_per_bar] for i in range(0, len(beat_chords), beats_per_bar)]
 
 
-_BEAT_TO_DUR = {1: "4", 2: "2", 3: "2.", 4: "1"}
-
-
-def _ly_chord_token(label: str, beats: int) -> str:
-    root, qual = crema_to_ly(label)
-    if root == "s":
-        return " ".join("s4" for _ in range(beats))
-    return f"{root}{_BEAT_TO_DUR.get(beats, '4')}{qual}"
-
-
-def bar_to_chord_events(bar: list[dict]) -> str:
-    labels = [b["chord"] for b in bar]
-    tokens, i = [], 0
-    while i < len(labels):
-        run = 1
-        while i + run < len(labels) and labels[i + run] == labels[i]:
-            run += 1
-        tokens.append(_ly_chord_token(labels[i], run))
-        i += run
-    return " ".join(tokens)
+def bar_sync_chords(beat_chords: list[dict], beats_per_bar: int) -> list[dict]:
+    """Collapse beat-level chords to one chord per bar via confidence-weighted majority vote."""
+    bars = []
+    for i in range(0, len(beat_chords), beats_per_bar):
+        group = beat_chords[i : i + beats_per_bar]
+        scores: dict[str, float] = {}
+        for b in group:
+            scores[b["chord"]] = scores.get(b["chord"], 0.0) + b["confidence"]
+        best = max(scores, key=scores.__getitem__)
+        winning = [b for b in group if b["chord"] == best]
+        bars.append({
+            "bar":        len(bars) + 1,
+            "beat":       group[0]["beat"],
+            "time":       group[0]["time"],
+            "chord":      best,
+            "confidence": round(sum(b["confidence"] for b in winning) / len(winning), 3),
+        })
+    return bars
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +190,7 @@ def key_override_to_display(key_str: str) -> str:
 # ---------------------------------------------------------------------------
 
 def generate_lilypond(
-    beat_chords: list[dict],
+    bar_chords: list[dict],
     title: str,
     beats_per_bar: int,
     key_stmt: str,
@@ -183,18 +198,20 @@ def generate_lilypond(
     low_conf_pct: float,
     subtitle: str = "",
 ) -> str:
-    bars = beats_to_bars(beat_chords, beats_per_bar)
+    bar_dur    = {2: "2",  3: "2.", 4: "1"}.get(beats_per_bar, "1")
     bar_spacer = {2: "s2", 3: "s2.", 4: "s1"}.get(beats_per_bar, "s1")
 
     chord_lines, spacer_lines = [], []
-    for i, bar in enumerate(bars):
-        chord_line = bar_to_chord_events(bar)
-        short = beats_per_bar - len(bar)
-        if short > 0:
-            chord_line += " " + " ".join("s4" for _ in range(short))
-        chord_lines.append(chord_line)
+    for i, bar in enumerate(bar_chords):
+        root, qual = crema_to_ly(bar["chord"])
+        # Spacer rests can't use dotted/compound durations in chordmode — expand to quarters
+        if root == "s":
+            token = " ".join("s4" for _ in range(beats_per_bar))
+        else:
+            token = f"{root}{bar_dur}{qual}"
+        chord_lines.append(token)
         spacer_lines.append(bar_spacer)
-        if (i + 1) % bars_per_line == 0 and i < len(bars) - 1:
+        if (i + 1) % bars_per_line == 0 and i < len(bar_chords) - 1:
             spacer_lines.append("\\break")
 
     subtitle_line = f'  subtitle = \\markup {{ \\italic "{subtitle}" }}' if subtitle else ""
@@ -336,28 +353,34 @@ def main() -> None:
         beats_per_bar = detect_time_signature(y, sr, beat_times)
         print(f"\n[4/5] Time signature: {beats_per_bar}/4 (auto-detected)")
 
-    # 5. Align chords to beats
+    # 5. Align chords to beats, simplify to major/minor, collapse to bar level
     print(f"\n[5/5] Aligning chords to beat grid …")
     beat_chords = beat_sync_chords(times, confidence, labels, beat_times, sr, hop)
 
-    low_conf = sum(1 for b in beat_chords if b["confidence"] < args.threshold)
-    low_pct  = 100 * low_conf / max(len(beat_chords), 1)
-    print(f"  Low-confidence beats: {low_conf}/{len(beat_chords)} ({low_pct:.0f}%)")
+    # Simplify: strip 7ths, diminished, augmented → plain major or minor
+    beat_chords = [{**b, "chord": simplify_chord(b["chord"])} for b in beat_chords]
+
+    # One chord per bar (confidence-weighted majority vote)
+    bar_chords = bar_sync_chords(beat_chords, beats_per_bar)
+
+    low_conf = sum(1 for b in bar_chords if b["confidence"] < args.threshold)
+    low_pct  = 100 * low_conf / max(len(bar_chords), 1)
+    print(f"  Low-confidence bars: {low_conf}/{len(bar_chords)} ({low_pct:.0f}%)")
 
     print("\n  Chord summary (changes only):")
     prev = None
-    for b in beat_chords:
+    for b in bar_chords:
         if b["chord"] != prev:
             flag = " ?" if b["confidence"] < args.threshold else ""
-            print(f"    Beat {b['beat']:>3}  {b['time']:>6.1f}s  {crema_to_display(b['chord']):<8}  ({b['confidence']:.0%}{flag})")
+            print(f"    Bar  {b['bar']:>3}  {b['time']:>6.1f}s  {crema_to_display(b['chord']):<8}  ({b['confidence']:.0%}{flag})")
             prev = b["chord"]
 
     # Build subtitle
-    key_stmt = _ly_key(args.key) if args.key != "auto" else guess_key(beat_chords)
+    key_stmt = _ly_key(args.key) if args.key != "auto" else guess_key(bar_chords)
     if args.subtitle is not None:
         subtitle = args.subtitle
     else:
-        key_display = key_override_to_display(args.key) if args.key != "auto" else guess_key_display(beat_chords)
+        key_display = key_override_to_display(args.key) if args.key != "auto" else guess_key_display(bar_chords)
         parts = []
         if not args.no_meter: parts.append(f"Meter: {beats_per_bar}/4")
         if not args.no_key:   parts.append(f"Key: {key_display}")
@@ -366,7 +389,7 @@ def main() -> None:
 
     print(f"\nRendering PDF …  ({subtitle or 'no subtitle'})")
     ly_src = generate_lilypond(
-        beat_chords, title=title, beats_per_bar=beats_per_bar,
+        bar_chords, title=title, beats_per_bar=beats_per_bar,
         key_stmt=key_stmt, bars_per_line=args.bars_per_line,
         low_conf_pct=low_pct, subtitle=subtitle,
     )

@@ -33,9 +33,11 @@ Examples:
         """,
     )
     # ── Input ───────────────────────────────────────────────
-    p.add_argument("-i", "--input",  required=True, help="Input audio file")
-    p.add_argument("--title",        default=None,  help="Chart title (default: filename)")
-    p.add_argument("--open",         action="store_true", help="Open PDF when done")
+    p.add_argument("-i", "--input",      required=True, help="Input audio file")
+    p.add_argument("--title",            default=None,  help="Chart title (default: filename)")
+    p.add_argument("--output-dir",       default=None,  dest="output_dir",
+                   help="Directory for all output files (default: same as input)")
+    p.add_argument("--open",             action="store_true", help="Open PDF when done")
 
     # ── Beat stabilizer ─────────────────────────────────────
     stab = p.add_argument_group("Beat stabilizer")
@@ -97,22 +99,24 @@ def main() -> None:
         if not os.path.isfile(venv):
             sys.exit(f"{name} not found at {venv}\nRun  bash setup.sh  first.")
 
-    stem  = os.path.splitext(args.input)[0]
-    title = args.title or os.path.basename(stem)
+    input_base = os.path.splitext(os.path.basename(args.input))[0]
+    out_dir    = os.path.abspath(args.output_dir) if args.output_dir else os.path.dirname(os.path.abspath(args.input))
+    os.makedirs(out_dir, exist_ok=True)
+    title = args.title or input_base
 
     # ── Step 1 / 3  —  Beat stabilization ───────────────────
     if args.skip_stabilize:
         print("\n[pipeline] Skipping beat stabilization.")
         stabilised = args.input
     else:
-        stabilised = stem + "_stabilised.wav"
+        stabilised = os.path.join(out_dir, input_base + "_stabilised.wav")
         cmd = [sys.executable, stabilizer, "-i", args.input, "-o", stabilised]
         if args.bpm:          cmd += ["--bpm", str(args.bpm)]
         if args.strength != 1.0: cmd += ["--strength", str(args.strength)]
         run(cmd, "STEP 1 / 3  —  Beat Stabilization")
 
     # ── Step 2 / 3  —  Chord chart ──────────────────────────
-    chart_out = stem + "_chord_chart"
+    chart_out = os.path.join(out_dir, input_base + "_chord_chart")
     cmd = [
         crema_python, chart_render,
         "-i", stabilised, "--title", title, "--output", chart_out,
@@ -131,7 +135,7 @@ def main() -> None:
     if args.skip_stems:
         print("\n[pipeline] Skipping stem splitting.")
     else:
-        stems_out = stem + "_stems"
+        stems_out = os.path.join(out_dir, input_base + "_stems")
         cmd = [
             demucs_python, stem_splitter,
             "-i", stabilised,
@@ -148,7 +152,7 @@ def main() -> None:
         print(f"     Stabilised audio : {stabilised}")
     print(f"     Chord chart PDF  : {chart_out}.pdf")
     if not args.skip_stems:
-        print(f"     Stems            : {stem}_stems/")
+        print(f"     Stems            : {stems_out}/")
     print(f"{'='*54}\n")
 
 
