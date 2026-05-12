@@ -94,11 +94,13 @@ _QUALITY_TO_SIMPLE = {
 }
 
 
-def simplify_chord(label: str) -> str:
-    """Reduce any chord to plain major or minor (e.g. G:7 → G:maj, B:min7 → B:min)."""
+def simplify_chord(label: str, add_7th: bool = False) -> str:
+    """Reduce any chord to plain major or minor, optionally keeping 7th qualities."""
     if label in ("N", "X", ""):
         return label
     root, quality = label.split(":", 1) if ":" in label else (label, "maj")
+    if add_7th and quality in ("maj7", "min7", "7"):
+        return label
     base = _QUALITY_TO_SIMPLE.get(quality, "maj")
     return f"{root}:min" if base == "min" else f"{root}:maj"
 
@@ -126,22 +128,64 @@ def beats_to_bars(beat_chords: list[dict], beats_per_bar: int) -> list[list[dict
     return [beat_chords[i:i + beats_per_bar] for i in range(0, len(beat_chords), beats_per_bar)]
 
 
-def bar_sync_chords(beat_chords: list[dict], beats_per_bar: int) -> list[dict]:
-    """Collapse beat-level chords to one chord per bar via confidence-weighted majority vote."""
+_BEAT_TO_DUR = {1: "4", 2: "2", 3: "2.", 4: "1"}
+
+
+def _ly_chord_token(label: str, beats: int) -> str:
+    root, qual = crema_to_ly(label)
+    if root == "s":
+        return " ".join("s4" for _ in range(beats))
+    return f"{root}{_BEAT_TO_DUR.get(beats, '4')}{qual}"
+
+
+def hybrid_bar_chords(
+    beat_chords: list[dict],
+    beats_per_bar: int,
+    mid_bar_threshold: float = 0.80,
+) -> list[dict]:
+    """
+    Collapses beat-level chords to bars. Beat 1 is always the anchor chord.
+    Additional chord changes within a bar are included only when their confidence
+    >= mid_bar_threshold. Each bar contains a 'segments' list of runs.
+    """
     bars = []
     for i in range(0, len(beat_chords), beats_per_bar):
         group = beat_chords[i : i + beats_per_bar]
-        scores: dict[str, float] = {}
-        for b in group:
-            scores[b["chord"]] = scores.get(b["chord"], 0.0) + b["confidence"]
-        best = max(scores, key=scores.__getitem__)
-        winning = [b for b in group if b["chord"] == best]
+        if not group:
+            continue
+
+        current_chord = group[0]["chord"]
+        run_start = 0
+        segments = []
+
+        for j in range(1, len(group)):
+            b = group[j]
+            if b["chord"] != current_chord and b["confidence"] >= mid_bar_threshold:
+                run = group[run_start:j]
+                segments.append({
+                    "chord":      current_chord,
+                    "beats":      len(run),
+                    "confidence": round(sum(x["confidence"] for x in run) / len(run), 3),
+                    "time":       run[0]["time"],
+                })
+                current_chord = b["chord"]
+                run_start = j
+
+        run = group[run_start:]
+        segments.append({
+            "chord":      current_chord,
+            "beats":      len(run),
+            "confidence": round(sum(x["confidence"] for x in run) / len(run), 3),
+            "time":       run[0]["time"],
+        })
+
         bars.append({
             "bar":        len(bars) + 1,
             "beat":       group[0]["beat"],
             "time":       group[0]["time"],
-            "chord":      best,
-            "confidence": round(sum(b["confidence"] for b in winning) / len(winning), 3),
+            "chord":      group[0]["chord"],
+            "confidence": segments[0]["confidence"],
+            "segments":   segments,
         })
     return bars
 
@@ -198,18 +242,12 @@ def generate_lilypond(
     low_conf_pct: float,
     subtitle: str = "",
 ) -> str:
-    bar_dur    = {2: "2",  3: "2.", 4: "1"}.get(beats_per_bar, "1")
     bar_spacer = {2: "s2", 3: "s2.", 4: "s1"}.get(beats_per_bar, "s1")
 
     chord_lines, spacer_lines = [], []
     for i, bar in enumerate(bar_chords):
-        root, qual = crema_to_ly(bar["chord"])
-        # Spacer rests can't use dotted/compound durations in chordmode — expand to quarters
-        if root == "s":
-            token = " ".join("s4" for _ in range(beats_per_bar))
-        else:
-            token = f"{root}{bar_dur}{qual}"
-        chord_lines.append(token)
+        tokens = [_ly_chord_token(seg["chord"], seg["beats"]) for seg in bar["segments"]]
+        chord_lines.append(" ".join(tokens))
         spacer_lines.append(bar_spacer)
         if (i + 1) % bars_per_line == 0 and i < len(bar_chords) - 1:
             spacer_lines.append("\\break")
@@ -310,6 +348,10 @@ Examples:
     p.add_argument("--no-key",            action="store_true", help="Omit key from subtitle")
     p.add_argument("--no-meter",          action="store_true", help="Omit meter from subtitle")
     p.add_argument("--subtitle",          default=None,   help="Override entire subtitle ('' to hide)")
+    p.add_argument("--add-7th",           action="store_true", dest="add_7th",
+                   help="Keep maj7, m7, and dominant 7 chords (default: simplify to major/minor)")
+    p.add_argument("--mid-bar-threshold", type=float, default=0.80, dest="mid_bar_threshold",
+                   help="Confidence required for a mid-bar chord change to appear (default: 0.80)")
     p.add_argument("--open",              action="store_true", help="Open PDF when done")
     p.add_argument("--keep-ly",           action="store_true", help="Keep the .ly source file")
     return p.parse_args()
@@ -321,10 +363,11 @@ def main() -> None:
     if not os.path.isfile(args.input):
         sys.exit(f"File not found: {args.input}")
 
-    title    = args.title or os.path.splitext(os.path.basename(args.input))[0]
-    base     = args.output or os.path.splitext(args.input)[0]
-    pdf_path = base + ".pdf"
-    ly_path  = base + ".ly"
+    title     = args.title or os.path.splitext(os.path.basename(args.input))[0]
+    base      = args.output or os.path.splitext(args.input)[0]
+    pdf_path  = base + ".pdf"
+    ly_path   = base + ".ly"
+    json_path = base + ".json"
 
     # 1. Load
     print(f"\n[1/5] Loading {args.input} …")
@@ -353,27 +396,29 @@ def main() -> None:
         beats_per_bar = detect_time_signature(y, sr, beat_times)
         print(f"\n[4/5] Time signature: {beats_per_bar}/4 (auto-detected)")
 
-    # 5. Align chords to beats, simplify to major/minor, collapse to bar level
+    # 5. Align, simplify, collapse to bars
     print(f"\n[5/5] Aligning chords to beat grid …")
     beat_chords = beat_sync_chords(times, confidence, labels, beat_times, sr, hop)
 
-    # Simplify: strip 7ths, diminished, augmented → plain major or minor
-    beat_chords = [{**b, "chord": simplify_chord(b["chord"])} for b in beat_chords]
+    beat_chords = [{**b, "chord": simplify_chord(b["chord"], add_7th=args.add_7th)}
+                   for b in beat_chords]
 
-    # One chord per bar (confidence-weighted majority vote)
-    bar_chords = bar_sync_chords(beat_chords, beats_per_bar)
+    bar_chords = hybrid_bar_chords(beat_chords, beats_per_bar, args.mid_bar_threshold)
 
-    low_conf = sum(1 for b in bar_chords if b["confidence"] < args.threshold)
-    low_pct  = 100 * low_conf / max(len(bar_chords), 1)
-    print(f"  Low-confidence bars: {low_conf}/{len(bar_chords)} ({low_pct:.0f}%)")
+    all_segs  = [seg for bar in bar_chords for seg in bar["segments"]]
+    low_conf  = sum(1 for s in all_segs if s["confidence"] < args.threshold)
+    low_pct   = 100 * low_conf / max(len(all_segs), 1)
+    print(f"  Low-confidence segments: {low_conf}/{len(all_segs)} ({low_pct:.0f}%)")
 
     print("\n  Chord summary (changes only):")
     prev = None
-    for b in bar_chords:
-        if b["chord"] != prev:
-            flag = " ?" if b["confidence"] < args.threshold else ""
-            print(f"    Bar  {b['bar']:>3}  {b['time']:>6.1f}s  {crema_to_display(b['chord']):<8}  ({b['confidence']:.0%}{flag})")
-            prev = b["chord"]
+    for bar in bar_chords:
+        for k, seg in enumerate(bar["segments"]):
+            if seg["chord"] != prev:
+                flag   = " ?" if seg["confidence"] < args.threshold else ""
+                prefix = f"Bar {bar['bar']:>3}" if k == 0 else f"      beat {k+1}"
+                print(f"    {prefix}  {seg['time']:>6.1f}s  {crema_to_display(seg['chord']):<8}  ({seg['confidence']:.0%}{flag})")
+                prev = seg["chord"]
 
     # Build subtitle
     key_stmt = _ly_key(args.key) if args.key != "auto" else guess_key(bar_chords)
@@ -409,6 +454,36 @@ def main() -> None:
         os.unlink(ly_path)
 
     print(f"\n  PDF saved: {pdf_path}")
+
+    # Write analysis JSON
+    import json
+    beat_intervals = np.diff(beat_times)
+    all_confs      = [seg["confidence"] for seg in all_segs]
+    chord_changes  = sum(1 for k in range(1, len(all_segs))
+                         if all_segs[k]["chord"] != all_segs[k-1]["chord"])
+    analysis = {
+        "input":          args.input,
+        "title":          title,
+        "time_signature": f"{beats_per_bar}/4",
+        "key":            key_display if args.key == "auto" else key_override_to_display(args.key),
+        "bars":           len(bar_chords),
+        "chord_identification": {
+            "mean_confidence":   round(float(np.mean(all_confs)), 3),
+            "median_confidence": round(float(np.median(all_confs)), 3),
+            "low_confidence_pct": round(low_pct, 1),
+            "chord_changes":     chord_changes,
+        },
+        "alignment": {
+            "detected_bpm":     round(float(bpm), 2),
+            "bpm_source":       "sidecar" if sidecar_bpm else "auto",
+            "beat_count":       len(beat_times),
+            "beat_interval_cv": round(float(np.std(beat_intervals) / np.mean(beat_intervals)), 4),
+        },
+    }
+    with open(json_path, "w") as f:
+        json.dump(analysis, f, indent=2)
+    print(f"  Analysis  : {json_path}")
+
     if args.open:
         subprocess.run(["open", pdf_path])
 

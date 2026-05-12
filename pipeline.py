@@ -55,10 +55,14 @@ Examples:
     chart.add_argument("--time-sig",      type=int, default=None, dest="time_sig",
                        help="Beats per bar (default: auto)")
     chart.add_argument("--bars-per-line", type=int, default=4, dest="bars_per_line")
-    chart.add_argument("--no-bpm",        action="store_true", help="Omit BPM from chart subtitle")
-    chart.add_argument("--no-key",        action="store_true", help="Omit key from chart subtitle")
-    chart.add_argument("--no-meter",      action="store_true", help="Omit meter from chart subtitle")
-    chart.add_argument("--subtitle",      default=None, help="Override entire subtitle text")
+    chart.add_argument("--no-bpm",          action="store_true", help="Omit BPM from chart subtitle")
+    chart.add_argument("--no-key",          action="store_true", help="Omit key from chart subtitle")
+    chart.add_argument("--no-meter",        action="store_true", help="Omit meter from chart subtitle")
+    chart.add_argument("--subtitle",        default=None, help="Override entire subtitle text")
+    chart.add_argument("--add-7th",         action="store_true", dest="add_7th",
+                       help="Keep maj7, m7, dominant 7 chords (default: simplify to major/minor)")
+    chart.add_argument("--mid-bar-threshold", type=float, default=0.80, dest="mid_bar_threshold",
+                       help="Confidence threshold for mid-bar chord changes (default: 0.80)")
 
     # ── Stem splitter ────────────────────────────────────────
     stems = p.add_argument_group("Stem splitter")
@@ -122,13 +126,15 @@ def main() -> None:
         "-i", stabilised, "--title", title, "--output", chart_out,
         "--bars-per-line", str(args.bars_per_line),
     ]
-    if args.key != "auto":        cmd += ["--key",      args.key]
-    if args.time_sig:             cmd += ["--time-sig", str(args.time_sig)]
-    if args.no_bpm:               cmd += ["--no-bpm"]
-    if args.no_key:               cmd += ["--no-key"]
-    if args.no_meter:             cmd += ["--no-meter"]
-    if args.subtitle is not None: cmd += ["--subtitle", args.subtitle]
-    if args.open:                 cmd += ["--open"]
+    if args.key != "auto":              cmd += ["--key",              args.key]
+    if args.time_sig:                   cmd += ["--time-sig",         str(args.time_sig)]
+    if args.no_bpm:                     cmd += ["--no-bpm"]
+    if args.no_key:                     cmd += ["--no-key"]
+    if args.no_meter:                   cmd += ["--no-meter"]
+    if args.subtitle is not None:       cmd += ["--subtitle",         args.subtitle]
+    if args.add_7th:                    cmd += ["--add-7th"]
+    if args.mid_bar_threshold != 0.80:  cmd += ["--mid-bar-threshold", str(args.mid_bar_threshold)]
+    if args.open:                       cmd += ["--open"]
     run(cmd, "STEP 2 / 3  —  Chord Chart")
 
     # ── Step 3 / 3  —  Stem splitting ───────────────────────
@@ -151,6 +157,7 @@ def main() -> None:
     if not args.skip_stabilize:
         print(f"     Stabilised audio : {stabilised}")
     print(f"     Chord chart PDF  : {chart_out}.pdf")
+    print(f"     Analysis JSON    : {chart_out}.json")
     if not args.skip_stems:
         print(f"     Stems            : {stems_out}/")
     print(f"{'='*54}\n")
