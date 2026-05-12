@@ -104,7 +104,8 @@ def main() -> None:
             sys.exit(f"{name} not found at {venv}\nRun  bash setup.sh  first.")
 
     input_base = os.path.splitext(os.path.basename(args.input))[0]
-    out_dir    = os.path.abspath(args.output_dir) if args.output_dir else os.path.dirname(os.path.abspath(args.input))
+    base_dir   = os.path.abspath(args.output_dir) if args.output_dir else os.path.expanduser("~/Desktop/audio-tools-tests")
+    out_dir    = os.path.join(base_dir, input_base)
     os.makedirs(out_dir, exist_ok=True)
     title = args.title or input_base
 
