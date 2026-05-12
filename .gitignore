@@ -1,0 +1,14 @@
+venv_crema/
+__pycache__/
+*.pyc
+*.wav
+*.mp3
+*.m4a
+*.aiff
+*.aif
+*.flac
+*.ogg
+*.pdf
+*.ly
+*.bpm
+.DS_Store

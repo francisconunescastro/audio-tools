@@ -1,0 +1,13 @@
+# Chord detection dependencies — installed into venv_crema by setup.sh
+# Do NOT install these into the system Python; they need an isolated env.
+#
+# Note: setuptools<70 must be installed first (handled by setup.sh).
+
+crema==0.2.0
+tensorflow>=2.10,<2.16
+keras>=2.10,<3.0
+scikit-learn>=0.24,<1.6
+pydub>=0.25.1
+soundfile>=0.12.1
+librosa>=0.10.0
+numpy>=1.24,<2.0
