@@ -128,6 +128,29 @@ def beats_to_bars(beat_chords: list[dict], beats_per_bar: int) -> list[list[dict
     return [beat_chords[i:i + beats_per_bar] for i in range(0, len(beat_chords), beats_per_bar)]
 
 
+def find_bar_phase(beat_chords: list[dict], beats_per_bar: int) -> int:
+    """
+    Try all beat offsets (0 … beats_per_bar-1) and return the one that places
+    the most chord changes exactly on bar boundaries rather than within bars.
+    """
+    best_phase, best_score = 0, -1.0
+    for phase in range(beats_per_bar):
+        chords = [b["chord"] for b in beat_chords[phase:]]
+        at_boundary = within_bar = 0
+        for i in range(1, len(chords)):
+            if chords[i] != chords[i - 1]:
+                if i % beats_per_bar == 0:
+                    at_boundary += 1
+                else:
+                    within_bar += 1
+        total = at_boundary + within_bar
+        score = at_boundary / total if total > 0 else 0.0
+        if score > best_score:
+            best_score = score
+            best_phase = phase
+    return best_phase
+
+
 _BEAT_TO_DUR = {1: "4", 2: "2", 3: "2.", 4: "1"}
 
 
@@ -409,6 +432,12 @@ def main() -> None:
     beat_chords = [{**b, "chord": simplify_chord(b["chord"], add_7th=args.add_7th)}
                    for b in beat_chords]
 
+    # Align the beat grid to real bar downbeats
+    bar_phase = find_bar_phase(beat_chords, beats_per_bar)
+    if bar_phase > 0:
+        print(f"  Bar phase: offset {bar_phase} beat(s) to align chord changes to bar boundaries")
+        beat_chords = beat_chords[bar_phase:]
+
     bar_chords = hybrid_bar_chords(beat_chords, beats_per_bar, args.mid_bar_threshold)
 
     all_segs  = [seg for bar in bar_chords for seg in bar["segments"]]
@@ -486,6 +515,7 @@ def main() -> None:
             "bpm_source":       "sidecar" if sidecar_bpm else "auto",
             "beat_count":       len(beat_times),
             "beat_interval_cv": round(float(np.std(beat_intervals) / np.mean(beat_intervals)), 4),
+            "bar_phase_offset": bar_phase,
         },
     }
     with open(json_path, "w") as f:
