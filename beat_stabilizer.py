@@ -6,15 +6,37 @@ Detects beats in an audio file (or accepts a manual BPM), then warps
 the audio so every beat lands on an even musical grid — like Ableton's
 "warp to grid" feature but from the command line.
 
+Beat detection uses madmom's RNN + DBN tracker (via venv_madmom) when
+available — significantly more accurate than librosa, especially for
+half-time grooves and irregular rhythms.  Librosa is the fallback.
+
 After saving, writes a <output>.bpm sidecar file so downstream tools
 (chord_chart_render.py, pipeline.py) can pick up the exact target BPM
 without re-detecting it.
+
+Half-time detection
+-------------------
+When --bpm is supplied, the detected beat count is compared against the
+expected count (target_bpm / 60 × duration).  If the ratio is ≈ 2, the
+tracker locked onto 8th notes instead of quarter notes.  All detected
+beats are kept as warp anchors (2× correction density) but mapped to
+the 8th-note grid, so the output plays at the correct quarter-note tempo
+without stretching the file to double length.
+
+Intro trim (on by default)
+--------------------------
+The output starts exactly one bar before the first detected beat.  This
+makes it trivial to drop the file into a DAW: set the project tempo, put
+the clip at bar 1 beat 1, and the music lines up immediately.  If the
+first beat is within one bar of the file start, silence is prepended
+instead of trimming.  Disable with --no-trim-intro.
 
 Usage:
     python3 beat_stabilizer.py -i input.mp3 -o output.wav
     python3 beat_stabilizer.py -i input.wav -o output.wav --bpm 120
     python3 beat_stabilizer.py -i input.aiff -o output.wav --strength 0.75
     python3 beat_stabilizer.py -i song.m4a --detect-only
+    python3 beat_stabilizer.py -i song.wav -o out.wav --no-trim-intro
 """
 
 import argparse
@@ -90,7 +112,51 @@ def write_bpm_sidecar(audio_path: str, bpm: float) -> None:
 # ---------------------------------------------------------------------------
 
 def detect_beats_madmom(y_mono: np.ndarray, sr: int) -> np.ndarray:
-    import madmom
+    """
+    Run madmom's RNN + DBN beat tracker.
+
+    Tries venv_madmom via subprocess first (preferred — avoids import conflicts).
+    Falls back to a direct import if madmom happens to be installed in the
+    current environment.
+    """
+    import json, subprocess
+
+    script_dir    = os.path.dirname(os.path.abspath(__file__))
+    madmom_python = os.path.join(script_dir, "venv_madmom", "bin", "python3.11")
+
+    if os.path.isfile(madmom_python):
+        # Write mono audio to a temp WAV so madmom can read it as a file
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            sf.write(tmp_path, y_mono.astype(np.float32), sr)
+            code = (
+                # Patch np.int / np.float etc. removed in NumPy 1.24 but still
+                # referenced in madmom's compiled Cython (hmm.pyx).
+                "import numpy as _np\n"
+                "_np.int = int; _np.float = float; _np.complex = complex\n"
+                "_np.bool = bool; _np.object = object; _np.str = str\n"
+                "import sys, json\n"
+                "from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor\n"
+                "from madmom.processors import SequentialProcessor\n"
+                "proc = SequentialProcessor([\n"
+                "    RNNBeatProcessor(),\n"
+                "    DBNBeatTrackingProcessor(fps=100),\n"
+                "])\n"
+                "beats = proc(sys.argv[1])\n"
+                "print(json.dumps(beats.tolist()))\n"
+            )
+            result = subprocess.run(
+                [madmom_python, "-c", code, tmp_path],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr[-400:])
+            return np.array(json.loads(result.stdout.strip()), dtype=float)
+        finally:
+            os.unlink(tmp_path)
+
+    # Direct import fallback (only works when madmom is in the active env)
     from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
     sig = y_mono.astype(np.float32)
     act = RNNBeatProcessor()(sig)
@@ -195,7 +261,19 @@ Examples:
     p.add_argument("--bpm",               type=float,    default=None, help="Target BPM (auto-detected if omitted)")
     p.add_argument("--strength",          type=float,    default=1.0,  metavar="0-1", help="Quantisation strength (default 1.0)")
     p.add_argument("--sample-rate",       type=int,      default=44100)
-    p.add_argument("--detect-only",       action="store_true", help="Print detected BPM and exit without writing")
+    p.add_argument("--detect-only",       action="store_true",
+                   help="Print detected BPM and exit without writing")
+    # Intro trim is ON by default: the output starts one bar before the first
+    # detected beat so the file drops straight into a DAW without manual offsetting.
+    # Use --no-trim-intro to get the raw stabilised audio with no padding changes.
+    p.add_argument("--no-trim-intro",     action="store_false", dest="trim_intro",
+                   help="Disable the default intro trim (output starts at sample 0)")
+    p.add_argument("--trim-intro",        action="store_true",  dest="trim_intro",
+                   help="Trim output to start one bar before the first detected beat "
+                        "(on by default; silence-padded when the beat is near the file start)")
+    p.set_defaults(trim_intro=True)
+    p.add_argument("--beats-per-bar",     type=int,      default=4, dest="beats_per_bar",
+                   help="Beats per bar for the intro trim length (default: 4)")
     return p.parse_args()
 
 
@@ -226,14 +304,70 @@ def main() -> None:
     if args.bpm is not None:
         target_bpm = args.bpm
         print(f"\n[3/4] Using manual BPM: {target_bpm:.2f}")
+        # ── Duration-fit sanity check ──────────────────────────────────────
+        # Expected beats at target BPM vs actually detected.  A ratio near 2
+        # means the tracker locked onto 8th notes in a half-time groove —
+        # thin to every other beat so we don't stretch the file to 2× length.
+        expected_beats = target_bpm / 60.0 * duration
+        ratio = len(beat_times) / expected_beats
+        if 1.7 < ratio < 2.3:
+            # Half-time groove: the tracker locked onto 8th notes.
+            # Keep ALL detected beats as warp anchors (2× correction density)
+            # but map them to the 8th-note grid at target_bpm so the output
+            # audio plays at the correct quarter-note tempo.
+            warp_bpm = target_bpm * 2          # 8th-note grid spacing
+            print(f"  ⚠  Beat count ({len(beat_times)}) ≈ 2× expected "
+                  f"({expected_beats:.0f}) at {target_bpm} BPM  →  half-time groove.")
+            print(f"     Using all {len(beat_times)} sub-beat anchors at "
+                  f"{warp_bpm:.0f} BPM grid (2× correction density).")
+        elif 0.43 < ratio < 0.57:
+            warp_bpm = target_bpm
+            print(f"  ⚠  Beat count ({len(beat_times)}) ≈ ½ expected "
+                  f"({expected_beats:.0f}) at {target_bpm} BPM  →  double-time "
+                  f"detected; consider a higher --bpm value.")
+        else:
+            warp_bpm = target_bpm
     else:
         if detected_bpm <= 0 or len(beat_times) < 2:
             sys.exit("Could not detect a valid BPM. Try --bpm <value>.")
         target_bpm = round(detected_bpm)
+        warp_bpm   = target_bpm
         print(f"\n[3/4] Auto BPM: {detected_bpm:.2f} → rounded to {target_bpm}")
 
     print(f"\n[4/4] Stabilising (strength={args.strength}) …")
-    y_out = stabilize(y, sr, beat_times, target_bpm, strength=args.strength)
+    y_out = stabilize(y, sr, beat_times, warp_bpm, strength=args.strength)
+
+    # ── Intro trim ────────────────────────────────────────────────────────────
+    # After warping, the first beat is still at beat_times[0] seconds (stabilize
+    # keeps the first anchor in place).  We want the output to begin exactly one
+    # bar before that beat, using the final target_bpm (post any half-time
+    # thinning) so the bar length is musically consistent.
+    if args.trim_intro:
+        bar_duration   = args.beats_per_bar * 60.0 / target_bpm
+        first_beat_t   = float(beat_times[0])
+        trim_start_t   = first_beat_t - bar_duration
+
+        print(f"\n  Intro trim:")
+        print(f"    First beat     : {first_beat_t:.3f}s")
+        print(f"    Bar duration   : {bar_duration:.3f}s  "
+              f"({args.beats_per_bar} beats @ {target_bpm} BPM)")
+        print(f"    Target start   : {trim_start_t:.3f}s", end="")
+
+        if trim_start_t >= 0:
+            # There is enough audio before the first beat — just trim.
+            trim_sample = round(trim_start_t * sr)
+            y_out = y_out[trim_sample:] if y_out.ndim == 1 else y_out[trim_sample:, :]
+            print(f"  →  trimmed {trim_start_t:.3f}s from the front")
+        else:
+            # Not enough audio — prepend silence.
+            silence_dur    = abs(trim_start_t)
+            silence_frames = round(silence_dur * sr)
+            if y_out.ndim == 1:
+                silence = np.zeros(silence_frames, dtype=y_out.dtype)
+            else:
+                silence = np.zeros((silence_frames, y_out.shape[1]), dtype=y_out.dtype)
+            y_out = np.concatenate([silence, y_out], axis=0)
+            print(f"  →  prepended {silence_dur:.3f}s of silence")
 
     print(f"\nSaving …")
     saved_path = save_audio(args.output, y_out, sr)

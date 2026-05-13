@@ -16,10 +16,12 @@ Run with the crema venv:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 
 import numpy as np
 
@@ -32,6 +34,33 @@ from chord_sheet import (
     beat_sync_chords,
     CONFIDENCE_WARN,
 )
+
+
+# ---------------------------------------------------------------------------
+# Tunable detection thresholds
+#
+# Edit these values to change behaviour globally.  Every CLI flag that
+# controls a threshold uses the matching constant as its default, so
+# changing a constant here is equivalent to always passing that flag.
+# ---------------------------------------------------------------------------
+
+# Mid-bar chord splits: minimum crema confidence for a within-bar chord
+# change to appear in the chart.  Below this the bar keeps its beat-1 anchor.
+MID_BAR_THRESHOLD: float = 0.80
+
+# madmom bar fallback: bars whose *mean* crema confidence falls below this
+# value are re-evaluated with madmom's bar-window time-weighted chord vote.
+MADMOM_THRESHOLD: float = 0.70
+
+# Key snapping: low-confidence bars whose chord is non-diatonic to the
+# detected key are snapped to the nearest diatonic equivalent.
+# Set to 0.0 to effectively disable without removing the --key-snap flag.
+KEY_SNAP_THRESHOLD: float = 0.65
+
+# Low-confidence marker: segments below this are flagged '?' in the
+# terminal summary and counted in the JSON report.
+# Mirrors CONFIDENCE_WARN from chord_sheet.py (kept here for quick reference).
+CONFIDENCE_WARN_THRESHOLD: float = CONFIDENCE_WARN  # 0.45
 
 
 # ---------------------------------------------------------------------------
@@ -56,12 +85,12 @@ def read_bpm_sidecar(audio_path: str) -> float | None:
 # ---------------------------------------------------------------------------
 
 _ROOT_TO_LY = {
-    "C":  "c",   "C#": "des",  "Db": "des",
-    "D":  "d",   "D#": "ees",  "Eb": "ees",
+    "C":  "c",   "C#": "cis",  "Db": "des",
+    "D":  "d",   "D#": "dis",  "Eb": "ees",
     "E":  "e",   "Fb": "e",
-    "F":  "f",   "F#": "ges",  "Gb": "ges",
-    "G":  "g",   "G#": "aes",  "Ab": "aes",
-    "A":  "a",   "A#": "bes",  "Bb": "bes",
+    "F":  "f",   "F#": "fis",  "Gb": "ges",
+    "G":  "g",   "G#": "gis",  "Ab": "aes",
+    "A":  "a",   "A#": "ais",  "Bb": "bes",
     "B":  "b",   "Cb": "b",
 }
 
@@ -105,28 +134,32 @@ def simplify_chord(label: str, add_7th: bool = False) -> str:
     return f"{root}:min" if base == "min" else f"{root}:maj"
 
 
-def crema_to_ly(label: str) -> tuple[str, str]:
+def crema_to_ly(label: str, use_sharps: bool = False) -> tuple[str, str]:
     if label in ("N", "X", ""):
         return ("s", "")
     root, quality = label.split(":", 1) if ":" in label else (label, "maj")
+    # Normalise to the key's accidental policy before looking up the LilyPond name.
+    if use_sharps:
+        root = _FLAT_TO_SHARP_ROOT.get(root, root)
+    else:
+        root = _SHARP_TO_FLAT_ROOT.get(root, root)
     return (_ROOT_TO_LY.get(root, root.lower()), _QUALITY_TO_LY.get(quality, f":{quality}"))
 
 
-def crema_to_display(label: str) -> str:
+def crema_to_display(label: str, use_sharps: bool = False) -> str:
     if label in ("N", "X", ""):
         return ""
     root, quality = label.split(":", 1) if ":" in label else (label, "maj")
-    display_root = {"C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb"}.get(root, root)
+    if use_sharps:
+        display_root = _FLAT_TO_SHARP_ROOT.get(root, root)
+    else:
+        display_root = _SHARP_TO_FLAT_ROOT.get(root, root)
     return f"{display_root}{_QUALITY_DISPLAY.get(quality, quality)}"
 
 
 # ---------------------------------------------------------------------------
-# Beat data → bar-level LilyPond chord strings
+# Beat data → bar-level chord structures
 # ---------------------------------------------------------------------------
-
-def beats_to_bars(beat_chords: list[dict], beats_per_bar: int) -> list[list[dict]]:
-    return [beat_chords[i:i + beats_per_bar] for i in range(0, len(beat_chords), beats_per_bar)]
-
 
 def find_bar_phase(beat_chords: list[dict], beats_per_bar: int) -> int:
     """
@@ -151,11 +184,12 @@ def find_bar_phase(beat_chords: list[dict], beats_per_bar: int) -> int:
     return best_phase
 
 
+
 _BEAT_TO_DUR = {1: "4", 2: "2", 3: "2.", 4: "1"}
 
 
-def _ly_chord_token(label: str, beats: int) -> str:
-    root, qual = crema_to_ly(label)
+def _ly_chord_token(label: str, beats: int, use_sharps: bool = False) -> str:
+    root, qual = crema_to_ly(label, use_sharps)
     if root == "s":
         return " ".join("s4" for _ in range(beats))
     return f"{root}{_BEAT_TO_DUR.get(beats, '4')}{qual}"
@@ -171,11 +205,23 @@ def hybrid_bar_chords(
     Additional chord changes within a bar are included only when their confidence
     >= mid_bar_threshold. Each bar contains a 'segments' list of runs.
     """
-    bars = []
+    bars: list[dict] = []
+    # A chord that occupies only the last beat of a bar is an anticipation of the
+    # next bar's chord.  Rather than erasing it (old behaviour) or showing it on
+    # beat 4 (where it physically lives but doesn't rhythmically belong), we push
+    # it forward: it becomes the downbeat chord of the *next* bar.  This reflects
+    # the performer's stylistic choice without over-encoding it into the chart.
+    pending_anticipation: str | None = None
+
     for i in range(0, len(beat_chords), beats_per_bar):
         group = beat_chords[i : i + beats_per_bar]
         if not group:
             continue
+
+        # If the previous bar ended with an anticipation, override beat 1 here.
+        if pending_anticipation is not None:
+            group = [{**group[0], "chord": pending_anticipation}, *group[1:]]
+            pending_anticipation = None
 
         current_chord = group[0]["chord"]
         run_start = 0
@@ -202,11 +248,12 @@ def hybrid_bar_chords(
             "time":       run[0]["time"],
         })
 
-        # A chord that only occupies the last beat is almost always an anticipation
-        # of the next bar — absorb it back into the preceding segment
+        # Detect a 1-beat anticipation at the end of this bar and push it forward.
         if len(segments) > 1 and segments[-1]["beats"] == 1:
-            tail = segments.pop()
-            segments[-1] = {**segments[-1], "beats": segments[-1]["beats"] + 1}
+            pending_anticipation = segments[-1]["chord"]
+            # Extend the preceding segment to fill the bar cleanly.
+            segments[-2] = {**segments[-2], "beats": segments[-2]["beats"] + 1}
+            segments.pop()
 
         bars.append({
             "bar":        len(bars) + 1,
@@ -220,8 +267,374 @@ def hybrid_bar_chords(
 
 
 # ---------------------------------------------------------------------------
+# madmom bar-level fallback  (optional, --madmom-fallback)
+# ---------------------------------------------------------------------------
+
+def madmom_fallback_bars(
+    bar_chords: list[dict],
+    segments: list[tuple[float, float, str]],
+    beats_per_bar: int,
+    beat_interval: float,
+    confidence_threshold: float = MADMOM_THRESHOLD,
+    add_7th: bool = False,
+    use_sharps: bool = False,
+) -> tuple[list[dict], list[int]]:
+    """
+    For each bar whose mean crema confidence < confidence_threshold, replace
+    its entire content with madmom's time-weighted chord vote over the full
+    bar window (always a single chord — no mid-bar splits).
+
+    madmom segment boundaries do not align to the beat grid, so splitting
+    within a bar produces inaccurate beat counts.  We let crema handle any
+    genuine mid-bar changes; madmom is only used to correct the main chord.
+
+    Returns (new_bar_chords, list_of_substituted_bar_numbers).
+    """
+    n_bars = len(bar_chords)
+    new_bars: list[dict] = []
+    substituted: list[int] = []
+
+    for i, bar in enumerate(bar_chords):
+        mean_conf = float(np.mean([seg["confidence"] for seg in bar["segments"]]))
+
+        if mean_conf >= confidence_threshold:
+            new_bars.append(bar)
+            continue
+
+        # Full bar time window
+        t_start = bar["time"]
+        t_end   = (bar_chords[i + 1]["time"] if i + 1 < n_bars
+                   else t_start + beats_per_bar * beat_interval)
+        bar_dur = t_end - t_start
+
+        # Time-weighted chord coverage across the whole bar
+        coverage: dict[str, float] = {}
+        for seg_s, seg_e, label in segments:
+            if label == "N":
+                continue
+            overlap = max(0.0, min(seg_e, t_end) - max(seg_s, t_start))
+            if overlap > 0:
+                chord = simplify_chord(label, add_7th=add_7th)
+                coverage[chord] = coverage.get(chord, 0.0) + overlap
+
+        if not coverage:
+            new_bars.append(bar)
+            continue
+
+        top_chord, top_time = max(coverage.items(), key=lambda x: x[1])
+        conf = round(top_time / bar_dur, 3)
+        original = crema_to_display(bar["chord"], use_sharps)
+
+        new_segs = [{"chord": top_chord, "beats": beats_per_bar,
+                     "confidence": conf, "time": t_start}]
+        new_bar = {**bar, "chord": top_chord, "confidence": conf, "segments": new_segs}
+
+        print(f"    Bar {bar['bar']:>3}  {t_start:>6.1f}s  "
+              f"{original:<8} ({mean_conf:.0%}) → {crema_to_display(top_chord, use_sharps)}  [madmom]")
+        substituted.append(bar["bar"])
+        new_bars.append(new_bar)
+
+    return new_bars, substituted
+
+
+# ---------------------------------------------------------------------------
+# Key-constrained snapping
+# ---------------------------------------------------------------------------
+
+# Semitone numbers for all root names used by crema / simplify_chord
+_ROOT_TO_SEMITONE: dict[str, int] = {
+    "C": 0,  "C#": 1,  "Db": 1,
+    "D": 2,  "D#": 3,  "Eb": 3,
+    "E": 4,  "Fb": 4,
+    "F": 5,  "F#": 6,  "Gb": 6,
+    "G": 7,  "G#": 8,  "Ab": 8,
+    "A": 9,  "A#": 10, "Bb": 10,
+    "B": 11, "Cb": 11,
+}
+
+# Canonical root spellings — flat (default) and sharp variants.
+# Used when rebuilding chord labels from semitone numbers (e.g. after key snapping).
+_SEMITONE_TO_ROOT_FLAT: dict[int, str] = {
+    0: "C", 1: "Db", 2: "D", 3: "Eb", 4: "E", 5: "F",
+    6: "Gb", 7: "G", 8: "Ab", 9: "A", 10: "Bb", 11: "B",
+}
+_SEMITONE_TO_ROOT_SHARP: dict[int, str] = {
+    0: "C", 1: "C#", 2: "D", 3: "D#", 4: "E", 5: "F",
+    6: "F#", 7: "G", 8: "G#", 9: "A", 10: "A#", 11: "B",
+}
+# Backward-compat alias
+_SEMITONE_TO_ROOT = _SEMITONE_TO_ROOT_FLAT
+
+# Enharmonic respelling tables (applied when normalising to key's accidental policy).
+_FLAT_TO_SHARP_ROOT: dict[str, str] = {
+    "Db": "C#", "Eb": "D#", "Fb": "E", "Gb": "F#",
+    "Ab": "G#", "Bb": "A#", "Cb": "B",
+}
+_SHARP_TO_FLAT_ROOT: dict[str, str] = {
+    "C#": "Db", "D#": "Eb", "E#": "F", "F#": "Gb",
+    "G#": "Ab", "A#": "Bb", "B#": "C",
+}
+
+# Major keys (by tonic semitone) that use sharp accidentals.
+# All others use flats.  Enharmonic pairs (C#/Db, F#/Gb) are assigned to sharps;
+# the relative-minor rule then gives D#m/Ebm → sharps for D# but Eb → flats.
+_SHARP_MAJOR_ROOTS: frozenset[int] = frozenset({0, 2, 4, 6, 7, 9, 11})
+# C D E F# G A B  →  sharps
+# F Bb Eb Ab Db Gb →  flats  (semitones 5, 10, 3, 8, 1 — everything else)
+
+
+def _use_sharps(root_semitone: int, mode: str) -> bool:
+    """
+    Return True if this key conventionally uses sharp accidentals.
+
+    For major keys: C, G, D, A, E, B, F# (and C#) → sharps.
+    For minor keys: apply the relative-major rule (+3 semitones).
+        Am (rel C) → sharps;  Dm (rel F) → flats;  Bm (rel D) → sharps, etc.
+    """
+    if mode == "major":
+        return root_semitone in _SHARP_MAJOR_ROOTS
+    else:
+        rel_major = (root_semitone + 3) % 12
+        return rel_major in _SHARP_MAJOR_ROOTS
+
+
+# Diatonic scale degrees: (semitone offset from root, quality)
+_MAJOR_INTERVALS = [(0,"maj"),(2,"min"),(4,"min"),(5,"maj"),(7,"maj"),(9,"min"),(11,"min")]
+# Natural + harmonic minor union:
+#   v (natural)  and V (harmonic) are both accepted — major V is by far the most
+#   common chord in tonal minor-key music (e.g. G major in C minor).
+#   vii° from harmonic minor is simplified to (11,"min") here because simplify_chord
+#   collapses dim → min throughout the pipeline.
+_MINOR_INTERVALS = [
+    (0,"min"),  # i   — tonic
+    (2,"min"),  # ii° — simplified to min
+    (3,"maj"),  # III — bIII (aug in harmonic → still maj after simplification)
+    (5,"min"),  # iv
+    (7,"min"),  # v   — natural minor
+    (7,"maj"),  # V   — harmonic minor (major dominant — very common!)
+    (8,"maj"),  # VI  — bVI
+    (10,"maj"), # VII — bVII
+    (11,"min"), # vii°— harmonic minor leading tone (simplified to min)
+]
+
+
+def diatonic_set(root_semitone: int, mode: str) -> set[tuple[int, str]]:
+    """Return the set of (semitone % 12, quality) pairs that are diatonic to key."""
+    intervals = _MAJOR_INTERVALS if mode == "major" else _MINOR_INTERVALS
+    return {((root_semitone + offset) % 12, qual) for offset, qual in intervals}
+
+
+def _chord_semitone(label: str) -> tuple[int | None, str]:
+    """Return (semitone, simple_quality) for a chord label; (None, '') for N/X."""
+    if label in ("N", "X", ""):
+        return None, ""
+    root, quality = label.split(":", 1) if ":" in label else (label, "maj")
+    return _ROOT_TO_SEMITONE.get(root), _QUALITY_TO_SIMPLE.get(quality, "maj")
+
+
+def nearest_diatonic_chord(
+    label: str,
+    diatonic: set[tuple[int, str]],
+    use_sharps: bool = False,
+) -> str:
+    """
+    If label's (semitone, quality) pair is already in the diatonic set, return
+    it unchanged.  Otherwise find the closest diatonic chord by root distance
+    (circular semitone distance, tie-broken by preferring same quality) and
+    return it as a canonical chord label spelled according to use_sharps.
+    """
+    semitone, qual = _chord_semitone(label)
+    if semitone is None or (semitone, qual) in diatonic:
+        return label
+
+    def dist(s1: int, s2: int) -> int:
+        d = abs(s1 - s2) % 12
+        return min(d, 12 - d)
+
+    best_semi, best_qual = min(
+        diatonic,
+        key=lambda x: (dist(semitone, x[0]), 0 if x[1] == qual else 1),
+    )
+    root_map = _SEMITONE_TO_ROOT_SHARP if use_sharps else _SEMITONE_TO_ROOT_FLAT
+    suffix = ":min" if best_qual == "min" else ":maj"
+    return f"{root_map[best_semi]}{suffix}"
+
+
+def _parse_key_params(key_str: str) -> tuple[int, str]:
+    """
+    Parse a CLI key string (e.g. 'f#:minor', 'bes:major') into
+    (root_semitone, mode) where mode is 'major' or 'minor'.
+    """
+    parts = (key_str + ":major").split(":")
+    root_raw = parts[0].capitalize()
+    mode_raw = parts[1].lower()
+    # LilyPond-style flat names used in some inputs
+    _ly_alias = {
+        "Bes": "Bb", "Ees": "Eb", "Aes": "Ab", "Ges": "Gb",
+        "Des": "Db", "Fes": "E",  "Ces": "B",
+    }
+    root = _ly_alias.get(root_raw, root_raw)
+    semitone = _ROOT_TO_SEMITONE.get(root, 0)
+    mode = "minor" if mode_raw in ("minor", "min", "m") else "major"
+    return semitone, mode
+
+
+def detect_key_candidates(
+    y: np.ndarray, sr: int, n: int = 5,
+) -> list[tuple[float, int, str]]:
+    """
+    Compute Krumhansl-Schmuckler correlations for all 24 keys and return
+    the top-n candidates as [(score, root_semitone, mode), ...] sorted
+    best-first.  Used by detect_key_from_chroma() and, optionally, by the
+    chord-frequency tiebreaker.
+    """
+    import librosa
+
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    chroma_mean = chroma.mean(axis=1)  # shape (12,), index 0 = C
+
+    # Krumhansl-Schmuckler profiles (C-rooted; rotated to transpose)
+    major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09,
+                               2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+    minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
+                               2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
+    candidates: list[tuple[float, int, str]] = []
+    for root in range(12):
+        rotated = np.roll(chroma_mean, -root)
+        for profile, mode in [(major_profile, "major"), (minor_profile, "minor")]:
+            score = float(np.corrcoef(rotated, profile)[0, 1])
+            candidates.append((score, root, mode))
+
+    candidates.sort(reverse=True)
+    return candidates[:n]
+
+
+def detect_key_from_chroma(y: np.ndarray, sr: int) -> tuple[int, str]:
+    """
+    Estimate the musical key from the audio chromagram using
+    Krumhansl-Schmuckler key profiles.
+
+    Returns (root_semitone, mode) where mode is 'major' or 'minor'.
+    For disambiguation between closely related keys, combine with
+    refine_key_by_chord_frequency() after chord detection.
+    """
+    score, root, mode = detect_key_candidates(y, sr, n=1)[0]
+    return root, mode
+
+
+def refine_key_by_chord_frequency(
+    candidates: list[tuple[float, int, str]],
+    bar_chords: list[dict],
+) -> tuple[int, str]:
+    """
+    Disambiguate between closely related KS candidates using the actual
+    detected chords.
+
+    For each candidate key, compute a combined score:
+        combined = ks_score * (1 + 0.5 * tonic_fraction)
+    where tonic_fraction = (bars whose chord root matches the candidate
+    tonic) / total bars.
+
+    This resolves the common confusion between a major key and its
+    relative or parallel minor (e.g. Bb major vs C minor) by boosting
+    the candidate whose tonic is actually played most often.
+    """
+    if not bar_chords or not candidates:
+        return candidates[0][1], candidates[0][2]
+
+    # Count how many bars are rooted on each semitone
+    root_counts: dict[int, int] = {}
+    for bar in bar_chords:
+        semitone, _ = _chord_semitone(bar["chord"])
+        if semitone is not None:
+            root_counts[semitone] = root_counts.get(semitone, 0) + 1
+    total = len(bar_chords)
+
+    best_combined, best_root, best_mode = -np.inf, 0, "major"
+    for ks_score, root, mode in candidates:
+        tonic_fraction = root_counts.get(root, 0) / total
+        combined = ks_score * (1.0 + 0.5 * tonic_fraction)
+        if combined > best_combined:
+            best_combined, best_root, best_mode = combined, root, mode
+
+    return best_root, best_mode
+
+
+def guess_key_params(bar_chords: list[dict]) -> tuple[int, str]:
+    """Return (root_semitone, mode) for the most-common chord in bar_chords."""
+    roots = [lbl.split(":") for b in bar_chords if ":" in (lbl := b["chord"])]
+    if not roots:
+        return 0, "major"
+    root, qual = Counter(tuple(r) for r in roots).most_common(1)[0][0]
+    return _ROOT_TO_SEMITONE.get(root, 0), ("minor" if "min" in qual else "major")
+
+
+def key_snap_bars(
+    bar_chords: list[dict],
+    root_semitone: int,
+    mode: str,
+    threshold: float = KEY_SNAP_THRESHOLD,
+    use_sharps: bool = False,
+) -> tuple[list[dict], list[int]]:
+    """
+    For every bar whose mean confidence < threshold, check each segment.
+    Segments whose chord is non-diatonic to the key are snapped to the
+    nearest diatonic equivalent.
+
+    Returns (new_bar_chords, list_of_snapped_bar_numbers).
+    """
+    diatonic = diatonic_set(root_semitone, mode)
+    new_bars: list[dict] = []
+    snapped_bars: list[int] = []
+
+    for bar in bar_chords:
+        mean_conf = float(np.mean([seg["confidence"] for seg in bar["segments"]]))
+        if mean_conf >= threshold:
+            new_bars.append(bar)
+            continue
+
+        new_segs = []
+        bar_changed = False
+        for seg in bar["segments"]:
+            label = seg["chord"]
+            snapped = nearest_diatonic_chord(label, diatonic, use_sharps)
+            if snapped != label:
+                print(f"    Bar {bar['bar']:>3}  {seg['time']:>6.1f}s  "
+                      f"{crema_to_display(label, use_sharps):<8} → "
+                      f"{crema_to_display(snapped, use_sharps):<8}  "
+                      f"({seg['confidence']:.0%})  [key snap]")
+                seg = {**seg, "chord": snapped}
+                bar_changed = True
+            new_segs.append(seg)
+
+        if bar_changed:
+            snapped_bars.append(bar["bar"])
+            new_bars.append({**bar, "chord": new_segs[0]["chord"], "segments": new_segs})
+        else:
+            new_bars.append(bar)
+
+    return new_bars, snapped_bars
+
+
+# ---------------------------------------------------------------------------
 # Key helpers
 # ---------------------------------------------------------------------------
+
+def key_params_to_ly_stmt(root_semitone: int, mode: str) -> str:
+    """Convert (root_semitone, mode) → LilyPond \\key statement."""
+    root_map = _SEMITONE_TO_ROOT_SHARP if _use_sharps(root_semitone, mode) else _SEMITONE_TO_ROOT_FLAT
+    root = root_map[root_semitone]
+    ly_root = _ROOT_TO_LY.get(root, root.lower())
+    return f"\\key {ly_root} \\{mode}"
+
+
+def key_params_to_display(root_semitone: int, mode: str) -> str:
+    """Convert (root_semitone, mode) → human-readable key string e.g. 'Cm', 'F#'."""
+    root_map = _SEMITONE_TO_ROOT_SHARP if _use_sharps(root_semitone, mode) else _SEMITONE_TO_ROOT_FLAT
+    root = root_map[root_semitone]
+    return f"{root}{'m' if mode == 'minor' else ''}"
+
 
 def _ly_key(key_str: str) -> str:
     root, mode = (key_str + ":major").split(":")[:2]
@@ -230,7 +643,6 @@ def _ly_key(key_str: str) -> str:
 
 
 def guess_key(beat_chords: list[dict]) -> str:
-    from collections import Counter
     roots = [lbl.split(":") for b in beat_chords if ":" in (lbl := b["chord"])]
     if not roots:
         return "\\key c \\major"
@@ -239,7 +651,6 @@ def guess_key(beat_chords: list[dict]) -> str:
 
 
 def guess_key_display(beat_chords: list[dict]) -> str:
-    from collections import Counter
     roots = [lbl.split(":") for b in beat_chords if ":" in (lbl := b["chord"])]
     if not roots:
         return "C"
@@ -270,12 +681,16 @@ def generate_lilypond(
     bars_per_line: int,
     low_conf_pct: float,
     subtitle: str = "",
+    use_sharps: bool = False,
+    time_sig_str: str | None = None,
 ) -> str:
-    bar_spacer = {2: "s2", 3: "s2.", 4: "s1"}.get(beats_per_bar, "s1")
+    # time_sig_str overrides the default "{beats_per_bar}/4" — used for 6/8.
+    ts = time_sig_str or f"{beats_per_bar}/4"
+    bar_spacer = {2: "s2", 3: "s2.", 4: "s1", 6: "s2."}.get(beats_per_bar, "s1")
 
     chord_lines, spacer_lines = [], []
     for i, bar in enumerate(bar_chords):
-        tokens = [_ly_chord_token(seg["chord"], seg["beats"]) for seg in bar["segments"]]
+        tokens = [_ly_chord_token(seg["chord"], seg["beats"], use_sharps) for seg in bar["segments"]]
         chord_lines.append(" ".join(tokens))
         spacer_lines.append(bar_spacer)
         if (i + 1) % bars_per_line == 0 and i < len(bar_chords) - 1:
@@ -288,7 +703,6 @@ def generate_lilypond(
         if low_conf_pct > 30 else ""
     )
 
-    # Pre-compute joined strings (backslashes not allowed inside f-string expressions in Python ≤3.11)
     chord_body  = " |\n    ".join(chord_lines)
     spacer_body = "\n      ".join(spacer_lines)
 
@@ -331,7 +745,7 @@ theChords = \\chordmode {{
     }}
     \\new Staff {{
       {key_stmt}
-      \\time {beats_per_bar}/4
+      \\time {ts}
       \\override Staff.Clef.stencil = ##f
       \\override Staff.TimeSignature.stencil = ##f
       {spacer_body}
@@ -379,8 +793,34 @@ Examples:
     p.add_argument("--subtitle",          default=None,   help="Override entire subtitle ('' to hide)")
     p.add_argument("--add-7th",           action="store_true", dest="add_7th",
                    help="Keep maj7, m7, and dominant 7 chords (default: simplify to major/minor)")
-    p.add_argument("--mid-bar-threshold", type=float, default=0.80, dest="mid_bar_threshold",
-                   help="Confidence required for a mid-bar chord change to appear (default: 0.80)")
+    p.add_argument("--mid-bar-threshold", type=float, default=MID_BAR_THRESHOLD,
+                   dest="mid_bar_threshold",
+                   help=f"Confidence required for a mid-bar chord change to appear "
+                        f"(default: {MID_BAR_THRESHOLD})")
+    p.add_argument("--madmom-fallback",   action="store_true", dest="madmom_fallback",
+                   help="Use madmom to re-evaluate bars where crema confidence < --madmom-threshold")
+    p.add_argument("--madmom-threshold",  type=float, default=MADMOM_THRESHOLD,
+                   dest="madmom_threshold",
+                   help=f"Bar mean-confidence below which madmom fallback triggers "
+                        f"(default: {MADMOM_THRESHOLD})")
+    p.add_argument("--key-tiebreak",      action="store_true", dest="key_tiebreak",
+                   help="After chromagram key detection, refine the key by weighting candidates "
+                        "toward the root that appears most often in the detected bar chords "
+                        "(resolves major/minor ambiguity, e.g. Bb major vs C minor)")
+    p.add_argument("--key-snap",          action="store_true", dest="key_snap",
+                   help="Snap non-diatonic low-confidence chords to the nearest diatonic equivalent")
+    p.add_argument("--key-snap-threshold", type=float, default=KEY_SNAP_THRESHOLD,
+                   dest="key_snap_threshold",
+                   help=f"Bars below this mean confidence are eligible for key snapping "
+                        f"(default: {KEY_SNAP_THRESHOLD})")
+    p.add_argument("--half-time",          action="store_true", dest="half_time",
+                   help="Keep every other detected beat (fixes half-time grooves where the "
+                        "beat tracker locks onto 8th notes instead of quarter notes). "
+                        "Triggered automatically when --bpm is set and the detected rate "
+                        "is ~2× the specified BPM.")
+    p.add_argument("--compound",           action="store_true", dest="compound",
+                   help="Force 6/8 notation when the time signature would otherwise be 3/4 "
+                        "(auto-detected for most 6/8 songs; use this flag as a manual override).")
     p.add_argument("--open",              action="store_true", help="Open PDF when done")
     p.add_argument("--keep-ly",           action="store_true", help="Keep the .ly source file")
     return p.parse_args()
@@ -403,6 +843,27 @@ def main() -> None:
     y, sr = load_audio_mono(args.input, args.sample_rate)
     print(f"  {len(y)/sr:.1f}s  |  {sr} Hz  |  mono")
 
+    # Detect key early from chromagram so it's available for key-snap and subtitle.
+    # A manual --key flag always takes precedence.
+    # When --key-tiebreak is set the candidates are kept and the key is
+    # refined after bar_chords are available (see step 5 below).
+    if args.key != "auto":
+        key_root, key_mode = _parse_key_params(args.key)
+        key_stmt       = _ly_key(args.key)
+        key_display    = key_override_to_display(args.key)
+        _key_candidates = None          # tiebreaker not applicable
+    else:
+        _key_candidates = detect_key_candidates(y, sr, n=5)
+        key_root, key_mode = _key_candidates[0][1], _key_candidates[0][2]
+        key_stmt    = key_params_to_ly_stmt(key_root, key_mode)
+        key_display = key_params_to_display(key_root, key_mode)
+        print(f"  Key (chromagram): {key_display}")
+
+    # Accidental policy: sharp keys (G D A E B F# …) → use sharps everywhere;
+    # flat keys (F Bb Eb Ab Db …) → use flats.  Computed once from the key and
+    # threaded into every display and LilyPond function.
+    use_sharps = _use_sharps(key_root, key_mode)
+
     # 2. Detect chords
     print("\n[2/5] Detecting chords (crema) …")
     times, confidence, labels = detect_chords_crema(y, sr)
@@ -413,17 +874,45 @@ def main() -> None:
     print("\n[3/5] Detecting beats …")
     beat_times = detect_beats(y, sr)
     sidecar_bpm = read_bpm_sidecar(args.input) if args.bpm is None else None
-    bpm = args.bpm or sidecar_bpm or (60.0 / np.median(np.diff(beat_times)))
-    print(f"  {len(beat_times)} beats  |  {bpm:.1f} BPM"
+    detected_bpm = 60.0 / float(np.median(np.diff(beat_times)))
+    bpm = args.bpm or sidecar_bpm or detected_bpm
+    print(f"  {len(beat_times)} beats  |  {detected_bpm:.1f} BPM (detected)"
+          + (f"  |  override: {bpm:.0f} BPM" if (args.bpm or sidecar_bpm) else "")
           + (" (from sidecar)" if sidecar_bpm else ""))
+
+    # Half-time correction: if the beat tracker locked onto 8th notes (detected ≈ 2× target),
+    # keep every other beat to recover the quarter-note grid.
+    # Triggered explicitly by --half-time, or automatically when --bpm is given and
+    # the detected rate is roughly twice the specified BPM (ratio 1.7–2.3).
+    _auto_half = (
+        args.bpm is not None
+        and 1.7 < detected_bpm / args.bpm < 2.3
+    )
+    if args.half_time or _auto_half:
+        beat_times = beat_times[::2]
+        bpm_after  = 60.0 / float(np.median(np.diff(beat_times)))
+        trigger    = "--half-time flag" if args.half_time else f"auto (detected {detected_bpm:.0f} ≈ 2× {args.bpm:.0f})"
+        print(f"  Half-time correction ({trigger}): "
+              f"{len(beat_times)} beats  |  {bpm_after:.1f} BPM")
+        bpm = args.bpm or bpm_after   # honour the override in the subtitle
 
     # 4. Detect time signature
     if args.time_sig:
         beats_per_bar = args.time_sig
-        print(f"\n[4/5] Time signature: {beats_per_bar}/4 (manual)")
+        _ts_source = "manual"
     else:
         beats_per_bar = detect_time_signature(y, sr, beat_times)
-        print(f"\n[4/5] Time signature: {beats_per_bar}/4 (auto-detected)")
+        _ts_source = "auto-detected"
+
+    # detect_time_signature returns 6 to signal compound duple (6/8).
+    # --compound forces the same treatment for any 3-beat result.
+    _compound = (beats_per_bar == 6) or (args.compound and beats_per_bar == 3)
+    if _compound:
+        beats_per_bar = 3   # chord grid uses 3 beats per bar
+        time_sig_str  = "6/8"
+    else:
+        time_sig_str  = f"{beats_per_bar}/4"
+    print(f"\n[4/5] Time signature: {time_sig_str} ({_ts_source})")
 
     # 5. Align, simplify, collapse to bars
     print(f"\n[5/5] Aligning chords to beat grid …")
@@ -440,31 +929,90 @@ def main() -> None:
 
     bar_chords = hybrid_bar_chords(beat_chords, beats_per_bar, args.mid_bar_threshold)
 
-    all_segs  = [seg for bar in bar_chords for seg in bar["segments"]]
-    low_conf  = sum(1 for s in all_segs if s["confidence"] < args.threshold)
-    low_pct   = 100 * low_conf / max(len(all_segs), 1)
+    # Optional: chord-frequency tiebreaker to disambiguate closely related keys
+    if args.key_tiebreak and _key_candidates is not None:
+        refined_root, refined_mode = refine_key_by_chord_frequency(_key_candidates, bar_chords)
+        refined_display = key_params_to_display(refined_root, refined_mode)
+        if (refined_root, refined_mode) != (key_root, key_mode):
+            print(f"  Key (tiebreaker): {key_display} → {refined_display}")
+        else:
+            print(f"  Key (tiebreaker): {refined_display} (unchanged)")
+        key_root, key_mode = refined_root, refined_mode
+        key_stmt    = key_params_to_ly_stmt(key_root, key_mode)
+        key_display = refined_display
+        use_sharps  = _use_sharps(key_root, key_mode)
+
+    # Optional: madmom bar-level fallback for low-confidence bars
+    madmom_substituted: list[int] = []
+    if args.madmom_fallback:
+        script_dir    = os.path.dirname(os.path.abspath(__file__))
+        madmom_python = os.path.join(script_dir, "venv_madmom", "bin", "python3.11")
+        madmom_script = os.path.join(script_dir, "madmom_chord_detect.py")
+        if not os.path.isfile(madmom_python):
+            print("  [madmom] venv_madmom not found — skipping fallback")
+        else:
+            print(f"  madmom fallback (bar mean confidence < {args.madmom_threshold:.0%}) …")
+            result = subprocess.run(
+                [madmom_python, madmom_script, "--dump-segments", "-i", args.input],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"  [madmom] detection failed — skipping fallback\n{result.stderr[-500:]}")
+            else:
+                import json as _json
+                raw = _json.loads(result.stdout.strip())
+                segments = [(s, e, l) for s, e, l in raw]
+                beat_interval = float(np.median(np.diff(beat_times)))
+                bar_chords, madmom_substituted = madmom_fallback_bars(
+                    bar_chords, segments,
+                    beats_per_bar        = beats_per_bar,
+                    beat_interval        = beat_interval,
+                    confidence_threshold = args.madmom_threshold,
+                    add_7th              = args.add_7th,
+                    use_sharps           = use_sharps,
+                )
+                print(f"  → {len(madmom_substituted)} bar(s) updated from madmom")
+
+    # Optional: key-constrained snapping for low-confidence non-diatonic chords
+    key_snapped: list[int] = []
+    if args.key_snap:
+        print(f"  key snap ({key_mode}, root semitone {key_root}, "
+              f"threshold {args.key_snap_threshold:.0%}) …")
+        bar_chords, key_snapped = key_snap_bars(
+            bar_chords, key_root, key_mode, args.key_snap_threshold,
+            use_sharps=use_sharps,
+        )
+        print(f"  → {len(key_snapped)} bar(s) snapped to diatonic chord")
+
+    all_segs = [seg for bar in bar_chords for seg in bar["segments"]]
+    low_conf = sum(1 for s in all_segs if s["confidence"] < args.threshold)
+    low_pct  = 100 * low_conf / max(len(all_segs), 1)
     print(f"  Low-confidence segments: {low_conf}/{len(all_segs)} ({low_pct:.0f}%)")
 
+    madmom_bar_set  = set(madmom_substituted)
+    key_snap_bar_set = set(key_snapped)
     print("\n  Chord summary (changes only):")
     prev = None
     for bar in bar_chords:
         beat_pos = 1
+        tags = []
+        if bar["bar"] in madmom_bar_set:   tags.append("madmom")
+        if bar["bar"] in key_snap_bar_set: tags.append("key snap")
+        tag = f"  [{', '.join(tags)}]" if tags else ""
         for seg in bar["segments"]:
             if seg["chord"] != prev:
                 flag   = " ?" if seg["confidence"] < args.threshold else ""
                 prefix = f"Bar {bar['bar']:>3}" if beat_pos == 1 else f"      beat {beat_pos}"
-                print(f"    {prefix}  {seg['time']:>6.1f}s  {crema_to_display(seg['chord']):<8}  ({seg['confidence']:.0%}{flag})")
+                print(f"    {prefix}  {seg['time']:>6.1f}s  {crema_to_display(seg['chord'], use_sharps):<8}  ({seg['confidence']:.0%}{flag}){tag if beat_pos == 1 else ''}")
                 prev = seg["chord"]
             beat_pos += seg["beats"]
 
-    # Build subtitle
-    key_stmt = _ly_key(args.key) if args.key != "auto" else guess_key(bar_chords)
+    # Build subtitle  (key_stmt and key_display already computed from chromagram above)
     if args.subtitle is not None:
         subtitle = args.subtitle
     else:
-        key_display = key_override_to_display(args.key) if args.key != "auto" else guess_key_display(bar_chords)
         parts = []
-        if not args.no_meter: parts.append(f"Meter: {beats_per_bar}/4")
+        if not args.no_meter: parts.append(f"Meter: {time_sig_str}")
         if not args.no_key:   parts.append(f"Key: {key_display}")
         if not args.no_bpm:   parts.append(f"BPM: {round(bpm)}")
         subtitle = "  ·  ".join(parts)
@@ -474,6 +1022,7 @@ def main() -> None:
         bar_chords, title=title, beats_per_bar=beats_per_bar,
         key_stmt=key_stmt, bars_per_line=args.bars_per_line,
         low_conf_pct=low_pct, subtitle=subtitle,
+        use_sharps=use_sharps, time_sig_str=time_sig_str,
     )
 
     with open(ly_path, "w") as f:
@@ -493,7 +1042,6 @@ def main() -> None:
     print(f"\n  PDF saved: {pdf_path}")
 
     # Write analysis JSON
-    import json
     beat_intervals = np.diff(beat_times)
     all_confs      = [seg["confidence"] for seg in all_segs]
     chord_changes  = sum(1 for k in range(1, len(all_segs))
@@ -501,14 +1049,14 @@ def main() -> None:
     analysis = {
         "input":          args.input,
         "title":          title,
-        "time_signature": f"{beats_per_bar}/4",
-        "key":            key_display if args.key == "auto" else key_override_to_display(args.key),
+        "time_signature": time_sig_str,
+        "key":            key_display,
         "bars":           len(bar_chords),
         "chord_identification": {
-            "mean_confidence":   round(float(np.mean(all_confs)), 3),
-            "median_confidence": round(float(np.median(all_confs)), 3),
+            "mean_confidence":    round(float(np.mean(all_confs)), 3),
+            "median_confidence":  round(float(np.median(all_confs)), 3),
             "low_confidence_pct": round(low_pct, 1),
-            "chord_changes":     chord_changes,
+            "chord_changes":      chord_changes,
         },
         "alignment": {
             "detected_bpm":     round(float(bpm), 2),
@@ -516,6 +1064,18 @@ def main() -> None:
             "beat_count":       len(beat_times),
             "beat_interval_cv": round(float(np.std(beat_intervals) / np.mean(beat_intervals)), 4),
             "bar_phase_offset": bar_phase,
+        },
+        "madmom_fallback": {
+            "enabled":                 args.madmom_fallback,
+            "threshold":               args.madmom_threshold if args.madmom_fallback else None,
+            "bars_substituted":        len(madmom_substituted),
+            "substituted_bar_numbers": madmom_substituted,
+        },
+        "key_snap": {
+            "enabled":              args.key_snap,
+            "threshold":            args.key_snap_threshold if args.key_snap else None,
+            "bars_snapped":         len(key_snapped),
+            "snapped_bar_numbers":  key_snapped,
         },
     }
     with open(json_path, "w") as f:

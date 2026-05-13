@@ -216,6 +216,22 @@ def detect_time_signature(y: np.ndarray, sr: int, beat_times: np.ndarray) -> int
     if best == 2 and scores.get(4, 0) > scores[2] * 0.85:
         best = 4
 
+    # Compound-duple check: 3/4 vs 6/8.
+    # In 6/8 the dotted-quarter beat (= 1.5 quarter notes) creates a strong
+    # periodic accent.  The autocorrelation at that lag should therefore be
+    # almost as large as the bar-period lag.  In simple 3/4 the 1.5-beat
+    # position lands between quarter-note beats and is acoustically weak.
+    # We encode 6/8 as the return value 6; chord_chart_render.py handles it.
+    if best == 3:
+        half_lag = int(round(avg_beat_frames * 1.5))
+        if half_lag < len(ac):
+            window = max(1, int(avg_beat_frames * 0.15))
+            half_score = float(
+                ac[max(0, half_lag - window): half_lag + window + 1].mean()
+            )
+            if half_score >= scores[3] * 0.80:
+                best = 6  # compound duple → caller renders as 6/8
+
     return best
 
 
