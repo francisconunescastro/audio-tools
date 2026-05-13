@@ -82,8 +82,11 @@ Examples:
                        help="Keep maj7, m7, dominant 7 chords (default: simplify to major/minor)")
     chart.add_argument("--mid-bar-threshold", type=float, default=0.80, dest="mid_bar_threshold",
                        help="Confidence threshold for mid-bar chord changes (default: 0.80)")
-    chart.add_argument("--madmom-fallback",    action="store_true", dest="madmom_fallback",
-                       help="Use madmom to re-evaluate bars where crema confidence is low")
+    chart.add_argument("--no-madmom-fallback",  action="store_false", dest="madmom_fallback",
+                       help="Disable the default madmom fallback for low-confidence bars")
+    chart.add_argument("--madmom-fallback",     action="store_true",  dest="madmom_fallback",
+                       help="Re-evaluate low-confidence bars with madmom (on by default)")
+    p.set_defaults(madmom_fallback=True)
     chart.add_argument("--madmom-threshold",   type=float, default=0.70, dest="madmom_threshold",
                        help="Bar mean-confidence below which madmom fallback triggers (default: 0.70)")
     chart.add_argument("--key-tiebreak",       action="store_true", dest="key_tiebreak",
@@ -172,7 +175,7 @@ def main() -> None:
     if args.subtitle is not None:       cmd += ["--subtitle",         args.subtitle]
     if args.add_7th:                    cmd += ["--add-7th"]
     if args.mid_bar_threshold != 0.80:  cmd += ["--mid-bar-threshold", str(args.mid_bar_threshold)]
-    if args.madmom_fallback:                  cmd += ["--madmom-fallback"]
+    if not args.madmom_fallback:              cmd += ["--no-madmom-fallback"]
     if args.madmom_threshold != 0.70:         cmd += ["--madmom-threshold",   str(args.madmom_threshold)]
     if args.key_tiebreak:                     cmd += ["--key-tiebreak"]
     if args.key_snap:                         cmd += ["--key-snap"]

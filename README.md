@@ -138,7 +138,7 @@ For bars where crema's confidence is low you can enable a secondary pass with [m
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--madmom-fallback` | off | Re-evaluate low-confidence bars with madmom. madmom sees the full bar as one window and returns a single, time-weighted chord (no mid-bar splits — those remain crema's job). |
+| `--no-madmom-fallback` | — | Disable the madmom fallback (it is **on by default**). |
 | `--madmom-threshold` | `0.70` | Bars whose mean crema confidence falls below this are passed to madmom. |
 | `--key-snap` | off | After all chord detection, snap any remaining non-diatonic chord in a low-confidence bar to the nearest diatonic equivalent. Useful when the model picks an out-of-key chord that is close in pitch space to the correct one. |
 | `--key-snap-threshold` | `0.65` | Only bars below this mean confidence are eligible for key snapping. |

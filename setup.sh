@@ -13,7 +13,7 @@ echo "╚═══════════════════════�
 
 # ── 1. System dependencies ──────────────────────────────────
 echo ""
-echo "[ 1 / 5 ]  System dependencies"
+echo "[ 1 / 6 ]  System dependencies"
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     if ! command -v brew &>/dev/null; then
@@ -39,14 +39,14 @@ fi
 
 # ── 2. System Python — beat stabilizer deps ─────────────────
 echo ""
-echo "[ 2 / 5 ]  Beat stabilizer dependencies (system Python)"
+echo "[ 2 / 6 ]  Beat stabilizer dependencies (system Python)"
 python3 -m pip install -r requirements.txt --break-system-packages 2>/dev/null \
     || python3 -m pip install -r requirements.txt
 echo "  ✓  Done"
 
 # ── 3. Create crema venv (Python 3.11) ──────────────────────
 echo ""
-echo "[ 3 / 5 ]  Creating crema virtual environment (Python 3.11) …"
+echo "[ 3 / 6 ]  Creating crema virtual environment (Python 3.11) …"
 python3.11 -m venv venv_crema
 ./venv_crema/bin/pip install --upgrade pip --quiet
 # setuptools<70 must come before crema to restore pkg_resources
@@ -54,17 +54,45 @@ python3.11 -m venv venv_crema
 ./venv_crema/bin/pip install -r requirements_crema.txt
 echo "  ✓  venv_crema ready"
 
-# ── 4. Verify LilyPond ──────────────────────────────────────
+# ── 4. Create madmom venv (Python 3.11) ─────────────────────
+#
+# madmom's Cython extensions must be compiled against NumPy <2.0 and
+# require numpy + Cython to be present *before* madmom is installed
+# (its setup.py imports numpy at build time).
+#
+# On Apple Silicon, ARCHFLAGS is set so the extensions compile for arm64.
+# On Intel / Linux the variable is a no-op.
 echo ""
-echo "[ 4 / 5 ]  Creating demucs virtual environment (Python 3.11) …"
+echo "[ 4 / 6 ]  Creating madmom virtual environment (Python 3.11) …"
+python3.11 -m venv venv_madmom
+./venv_madmom/bin/pip install --upgrade pip --quiet
+
+# Step 1: install build dependencies first
+./venv_madmom/bin/pip install "numpy>=1.20,<2.0" Cython --quiet
+
+# Step 2: install madmom (compiles Cython extensions against the numpy above)
+if [[ "$(uname -m)" == "arm64" ]]; then
+    echo "  Apple Silicon detected — setting ARCHFLAGS for arm64 …"
+    ARCHFLAGS="-arch arm64" ./venv_madmom/bin/pip install madmom
+else
+    ./venv_madmom/bin/pip install madmom
+fi
+
+# Step 3: install remaining runtime deps
+./venv_madmom/bin/pip install -r requirements_madmom.txt --quiet
+echo "  ✓  venv_madmom ready"
+
+# ── 5. Create demucs venv (Python 3.11) ─────────────────────
+echo ""
+echo "[ 5 / 6 ]  Creating demucs virtual environment (Python 3.11) …"
 python3.11 -m venv venv_demucs
 ./venv_demucs/bin/pip install --upgrade pip --quiet
 ./venv_demucs/bin/pip install -r requirements_demucs.txt
 echo "  ✓  venv_demucs ready"
 
-# ── 5. Verify LilyPond ──────────────────────────────────────
+# ── 6. Verify LilyPond ──────────────────────────────────────
 echo ""
-echo "[ 5 / 5 ]  Checking LilyPond …"
+echo "[ 6 / 6 ]  Checking LilyPond …"
 if ! command -v lilypond &>/dev/null; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "  Installing LilyPond via Homebrew …"

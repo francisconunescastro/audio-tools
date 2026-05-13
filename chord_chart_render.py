@@ -797,8 +797,12 @@ Examples:
                    dest="mid_bar_threshold",
                    help=f"Confidence required for a mid-bar chord change to appear "
                         f"(default: {MID_BAR_THRESHOLD})")
-    p.add_argument("--madmom-fallback",   action="store_true", dest="madmom_fallback",
-                   help="Use madmom to re-evaluate bars where crema confidence < --madmom-threshold")
+    p.add_argument("--no-madmom-fallback", action="store_false", dest="madmom_fallback",
+                   help="Disable the default madmom fallback for low-confidence bars")
+    p.add_argument("--madmom-fallback",    action="store_true",  dest="madmom_fallback",
+                   help="Use madmom to re-evaluate bars where crema confidence < --madmom-threshold "
+                        "(on by default)")
+    p.set_defaults(madmom_fallback=True)
     p.add_argument("--madmom-threshold",  type=float, default=MADMOM_THRESHOLD,
                    dest="madmom_threshold",
                    help=f"Bar mean-confidence below which madmom fallback triggers "
