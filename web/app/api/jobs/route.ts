@@ -15,12 +15,15 @@ import {
   jobDir,
 } from "@/lib/jobs";
 import { probeDurationSeconds } from "@/lib/ffprobe";
+import { startOrQueue } from "@/lib/pipeline";
+import { sweepOldJobs } from "@/lib/cleanup";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   await ensureJobsRoot();
+  void sweepOldJobs().catch(() => { /* best-effort */ });
 
   let form: FormData;
   try {
@@ -90,6 +93,8 @@ export async function POST(request: Request) {
     inputExt: upload.ext,
     settings: parsed.data,
   });
+
+  startOrQueue(id);
 
   return NextResponse.json({ id }, { status: 201 });
 }
