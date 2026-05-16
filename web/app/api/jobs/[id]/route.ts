@@ -20,10 +20,13 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  // Defense in depth: if status claims "running" but the OS pid is dead, the
-  // server lost track of it (crash, hot-reload, manual kill). Auto-flip to error
-  // so the UI stops polling a ghost and the user can retry.
-  if (status.state === "running" && !isProcessAlive(status.pid)) {
+  // Defense in depth: if status claims "running" with a tracked OS pid that's
+  // now dead, the server lost track of it (crash, hot-reload, manual kill) —
+  // auto-flip to error so the UI stops polling a ghost. A null pid means the
+  // child has already exited cleanly and the job is in post-processing
+  // (zipping); leave it alone so we don't false-positive between exit and the
+  // final "done" write.
+  if (status.state === "running" && status.pid !== null && !isProcessAlive(status.pid)) {
     const patched = await updateStatus(params.id, {
       state: "error",
       error: { exitCode: null, stderrTail: "Process died unexpectedly. Try again." },

@@ -20,6 +20,7 @@ const STAGE_LABELS: Record<string, string> = {
   stabilize: "Stabilizing beats…",
   chord:     "Generating chord chart…",
   stems:     "Splitting stems…",
+  finalize:  "Packaging download…",
   done:      "Done",
 };
 

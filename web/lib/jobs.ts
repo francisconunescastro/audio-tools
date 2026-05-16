@@ -1,9 +1,20 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { Settings } from "./validation";
 
 export const REPO_ROOT = path.resolve(process.cwd(), "..");
-export const JOBS_ROOT = path.resolve(process.cwd(), "jobs");
+
+// Job artifacts (uploaded audio, per-job logs, output, ZIPs) live *outside*
+// the repo so they don't pollute the working tree or risk being committed.
+// Override with AUDIO_TOOLS_JOBS_DIR if you want a custom location.
+// macOS:   /var/folders/.../T/audio-tools-jobs
+// Linux:   /tmp/audio-tools-jobs
+// The 24-hour cleanup sweep in cleanup.ts still applies; the OS also reclaims
+// /tmp on its own schedule.
+export const JOBS_ROOT = process.env.AUDIO_TOOLS_JOBS_DIR
+  ? path.resolve(process.env.AUDIO_TOOLS_JOBS_DIR)
+  : path.join(os.tmpdir(), "audio-tools-jobs");
 
 export type JobState = "queued" | "running" | "done" | "error";
 

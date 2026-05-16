@@ -28,6 +28,10 @@ npm run dev                  # then open http://localhost:3000
 
 Limits: 50 MB upload, ~6 min audio, single concurrent job per server, artifacts auto-deleted after 24 h.
 
+Job artifacts (the uploaded audio, intermediate files, output ZIPs) are written to
+`$TMPDIR/audio-tools-jobs/` (e.g. `/var/folders/.../T/audio-tools-jobs` on macOS,
+`/tmp/audio-tools-jobs` on Linux). Set `AUDIO_TOOLS_JOBS_DIR=/custom/path` to override.
+
 ---
 
 ## Setup

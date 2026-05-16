@@ -18,7 +18,7 @@ __pycache__/
 # Web UI wrapper
 web/node_modules/
 web/.next/
-web/jobs/
+web/jobs/           # legacy: job artifacts now live in $TMPDIR/audio-tools-jobs
 web/.env*.local
 web/tsconfig.tsbuildinfo
 web/next-env.d.ts

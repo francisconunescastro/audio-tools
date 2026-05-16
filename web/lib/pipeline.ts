@@ -25,6 +25,7 @@ const STAGE_LABELS: Record<string, string> = {
   stabilize: "Stabilizing beats…",
   chord: "Generating chord chart…",
   stems: "Splitting stems…",
+  finalize: "Packaging download…",
   done: "Done",
 };
 
@@ -325,6 +326,20 @@ async function runJob(id: string): Promise<void> {
   activeChildPid = null;
 
   const wasCancelled = cancelledIds.delete(id);
+
+  // Clear the pid and refresh the heartbeat immediately: between here and the
+  // final "done" write we still run zipDirectory (can be several seconds for
+  // 150 MB+). Without this, the GET liveness check sees state="running" with
+  // a now-dead pid and flips the job to error, briefly flashing a false-
+  // positive crash screen right before "Processing complete".
+  if (exit === 0 && !wasCancelled) {
+    await updateStatus(id, {
+      stage: "finalize",
+      pct: 99,
+      pid: null,
+      lastHeartbeatAt: new Date().toISOString(),
+    });
+  }
 
   if (wasCancelled) {
     await updateStatus(id, {
