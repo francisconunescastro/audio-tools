@@ -13,3 +13,9 @@ __pycache__/
 *.ly
 *.bpm
 .DS_Store
+
+# Web UI wrapper
+web/node_modules/
+web/.next/
+web/jobs/
+web/.env*.local
