@@ -46,6 +46,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 
 import numpy as np
 import soundfile as sf
@@ -199,8 +201,33 @@ def detect_beats_librosa(y_mono: np.ndarray, sr: int) -> tuple[np.ndarray, float
     return np.asarray(beat_times, dtype=float), float(np.atleast_1d(tempo)[0])
 
 
+def _madmom_heartbeat(stop: threading.Event, duration_s: float) -> None:
+    """Emit synthetic progress ticks while madmom subprocess is blocking.
+
+    Interpolates pct from 0.16 → 0.48 over an estimated runtime so the
+    frontend bar visibly moves instead of freezing for 30–90 s.
+    """
+    expected_s = max(30.0, duration_s * 0.6)
+    start = time.monotonic()
+    while not stop.is_set():
+        time.sleep(4.0)
+        if stop.is_set():
+            break
+        elapsed = time.monotonic() - start
+        frac = min(elapsed / expected_s, 0.90)
+        _emit("detect_beats", 0.16 + frac * (0.48 - 0.16))
+
+
 def detect_beats(y: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
     y_mono = y.mean(axis=1) if y.ndim == 2 else y
+    duration_s = (len(y) if y.ndim == 1 else y.shape[0]) / sr
+
+    stop_event = threading.Event()
+    if _PROGRESS_JSON:
+        t = threading.Thread(target=_madmom_heartbeat, args=(stop_event, duration_s), daemon=True)
+        t.start()
+    else:
+        t = None
 
     try:
         beat_times = detect_beats_madmom(y_mono, sr)
@@ -209,6 +236,10 @@ def detect_beats(y: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
         return beat_times, bpm
     except Exception as e:
         print(f"  [madmom] not available ({e}), falling back to librosa …")
+    finally:
+        stop_event.set()
+        if t is not None:
+            t.join(timeout=1)
 
     beat_times, bpm = detect_beats_librosa(y_mono, sr)
     print(f"  [librosa] {len(beat_times)} beats  |  {bpm:.2f} BPM")
