@@ -106,10 +106,9 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
     return <ErrorView status={status} />;
   }
 
-  const elapsedMs = status.elapsedMs + (finishedRef.current ? 0 : tick * 0); // tick triggers re-render
-  // Recompute elapsed locally for smoother UX between polls
-  const localElapsedMs = status.elapsedMs;
-  void elapsedMs;
+  // `tick` is read to force a re-render every second so the elapsed clock advances
+  // between status polls; the value itself isn't used.
+  void tick;
 
   const label = STAGE_LABELS[status.stage] ?? status.stage;
   const pct = Math.max(0, Math.min(100, status.pct));
@@ -134,7 +133,7 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
             />
           </div>
           <div className="flex justify-between text-xs text-neutral-500">
-            <span>Elapsed: {formatElapsed(localElapsedMs)}</span>
+            <span>Elapsed: {formatElapsed(status.elapsedMs)}</span>
             <span className="font-mono">{status.state}</span>
           </div>
         </div>

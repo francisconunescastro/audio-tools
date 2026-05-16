@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DropZone } from "@/components/DropZone";
 import {
   AdvancedSettings,
@@ -10,12 +10,35 @@ import {
   type AdvancedState,
 } from "@/components/AdvancedSettings";
 
+const STORAGE_KEY = "audio-tools.advanced.v1";
+
 export default function UploadPage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [advanced, setAdvanced] = useState<AdvancedState>(DEFAULT_ADVANCED);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Rehydrate Advanced Settings from localStorage on mount.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<AdvancedState>;
+      setAdvanced((current) => ({ ...current, ...parsed }));
+    } catch {
+      // bad/missing JSON → keep defaults
+    }
+  }, []);
+
+  // Persist on change.
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(advanced));
+    } catch {
+      // quota/private mode → silently skip
+    }
+  }, [advanced]);
 
   async function onSubmit() {
     if (!file) return;
