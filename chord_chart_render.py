@@ -15,6 +15,8 @@ Run with the crema venv:
     ./venv_crema/bin/python3.11 chord_chart_render.py -i song.wav --no-bpm --bars-per-line 4
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -24,6 +26,24 @@ import tempfile
 from collections import Counter
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting (enabled by --progress-json; no-op otherwise)
+# ---------------------------------------------------------------------------
+
+_PROGRESS_JSON = False
+
+
+def _emit(sub: str, pct: float, msg: str | None = None) -> None:
+    """Emit a single PROGRESS JSON line on stdout (local 0.0–1.0)."""
+    if not _PROGRESS_JSON:
+        return
+    payload = {"sub": sub, "pct": float(pct)}
+    if msg:
+        payload["msg"] = msg
+    sys.stdout.write(f"PROGRESS {json.dumps(payload)}\n")
+    sys.stdout.flush()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from chord_sheet import (
@@ -827,11 +847,15 @@ Examples:
                         "(auto-detected for most 6/8 songs; use this flag as a manual override).")
     p.add_argument("--open",              action="store_true", help="Open PDF when done")
     p.add_argument("--keep-ly",           action="store_true", help="Keep the .ly source file")
+    p.add_argument("--progress-json",     action="store_true", dest="progress_json",
+                   help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
 
 
 def main() -> None:
+    global _PROGRESS_JSON
     args = parse_args()
+    _PROGRESS_JSON = args.progress_json
 
     if not os.path.isfile(args.input):
         sys.exit(f"File not found: {args.input}")
@@ -843,6 +867,7 @@ def main() -> None:
     json_path = base + ".json"
 
     # 1. Load
+    _emit("load", 0.02, "loading audio")
     print(f"\n[1/5] Loading {args.input} …")
     y, sr = load_audio_mono(args.input, args.sample_rate)
     print(f"  {len(y)/sr:.1f}s  |  {sr} Hz  |  mono")
@@ -869,14 +894,18 @@ def main() -> None:
     use_sharps = _use_sharps(key_root, key_mode)
 
     # 2. Detect chords
+    _emit("crema", 0.10, "crema chord detection")
     print("\n[2/5] Detecting chords (crema) …")
     times, confidence, labels = detect_chords_crema(y, sr)
+    _emit("crema", 0.45, f"{len(times)} frames")
     hop = int(round((times[1] - times[0]) * sr)) if len(times) > 1 else 4096
     print(f"  {len(times)} frames  |  mean confidence: {confidence.mean():.1%}")
 
     # 3. Detect beats — prefer explicit flag, then sidecar, then auto
+    _emit("beats", 0.50, "beat detection")
     print("\n[3/5] Detecting beats …")
     beat_times = detect_beats(y, sr)
+    _emit("beats", 0.60, f"{len(beat_times)} beats")
     sidecar_bpm = read_bpm_sidecar(args.input) if args.bpm is None else None
     detected_bpm = 60.0 / float(np.median(np.diff(beat_times)))
     bpm = args.bpm or sidecar_bpm or detected_bpm
@@ -919,6 +948,7 @@ def main() -> None:
     print(f"\n[4/5] Time signature: {time_sig_str} ({_ts_source})")
 
     # 5. Align, simplify, collapse to bars
+    _emit("align", 0.65, "aligning chords to bars")
     print(f"\n[5/5] Aligning chords to beat grid …")
     beat_chords = beat_sync_chords(times, confidence, labels, beat_times, sr, hop)
 
@@ -955,6 +985,7 @@ def main() -> None:
         if not os.path.isfile(madmom_python):
             print("  [madmom] venv_madmom not found — skipping fallback")
         else:
+            _emit("madmom", 0.75, "madmom fallback")
             print(f"  madmom fallback (bar mean confidence < {args.madmom_threshold:.0%}) …")
             result = subprocess.run(
                 [madmom_python, madmom_script, "--dump-segments", "-i", args.input],
@@ -1021,6 +1052,7 @@ def main() -> None:
         if not args.no_bpm:   parts.append(f"BPM: {round(bpm)}")
         subtitle = "  ·  ".join(parts)
 
+    _emit("render", 0.90, "rendering PDF")
     print(f"\nRendering PDF …  ({subtitle or 'no subtitle'})")
     ly_src = generate_lilypond(
         bar_chords, title=title, beats_per_bar=beats_per_bar,
@@ -1085,6 +1117,7 @@ def main() -> None:
     with open(json_path, "w") as f:
         json.dump(analysis, f, indent=2)
     print(f"  Analysis  : {json_path}")
+    _emit("render", 1.0, "done")
 
     if args.open:
         subprocess.run(["open", pdf_path])

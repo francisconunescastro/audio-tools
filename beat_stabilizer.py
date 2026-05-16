@@ -39,7 +39,10 @@ Usage:
     python3 beat_stabilizer.py -i song.wav -o out.wav --no-trim-intro
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -48,6 +51,27 @@ import numpy as np
 import soundfile as sf
 import librosa
 import pyrubberband as pyrb
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting (enabled by --progress-json; no-op otherwise)
+# ---------------------------------------------------------------------------
+
+_PROGRESS_JSON = False
+
+
+def _emit(sub: str, pct: float, msg: str | None = None) -> None:
+    """Emit a single PROGRESS JSON line on stdout.
+
+    `pct` is a local 0.0–1.0 value. pipeline.py remaps to the global range.
+    """
+    if not _PROGRESS_JSON:
+        return
+    payload = {"sub": sub, "pct": float(pct)}
+    if msg:
+        payload["msg"] = msg
+    sys.stdout.write(f"PROGRESS {json.dumps(payload)}\n")
+    sys.stdout.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -274,11 +298,15 @@ Examples:
     p.set_defaults(trim_intro=True)
     p.add_argument("--beats-per-bar",     type=int,      default=4, dest="beats_per_bar",
                    help="Beats per bar for the intro trim length (default: 4)")
+    p.add_argument("--progress-json",     action="store_true", dest="progress_json",
+                   help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
 
 
 def main() -> None:
+    global _PROGRESS_JSON
     args = parse_args()
+    _PROGRESS_JSON = args.progress_json
 
     if not os.path.isfile(args.input):
         sys.exit(f"File not found: {args.input}")
@@ -287,14 +315,17 @@ def main() -> None:
     if not 0.0 <= args.strength <= 1.0:
         sys.exit("--strength must be between 0.0 and 1.0")
 
+    _emit("load", 0.02, "loading audio")
     print(f"\n[1/4] Loading  {args.input} …")
     y, sr = load_audio(args.input, args.sample_rate)
     duration = (len(y) if y.ndim == 1 else y.shape[0]) / sr
     channels = 1 if y.ndim == 1 else y.shape[1]
     print(f"  {duration:.2f}s  |  {sr} Hz  |  {channels}ch")
 
+    _emit("detect_beats", 0.15, "detecting beats")
     print("\n[2/4] Detecting beats …")
     beat_times, detected_bpm = detect_beats(y, sr)
+    _emit("detect_beats", 0.55, f"{len(beat_times)} beats")
 
     if args.detect_only:
         print(f"\nDetected BPM : {detected_bpm:.3f}")
@@ -334,8 +365,10 @@ def main() -> None:
         warp_bpm   = target_bpm
         print(f"\n[3/4] Auto BPM: {detected_bpm:.2f} → rounded to {target_bpm}")
 
+    _emit("warp", 0.60, "warping")
     print(f"\n[4/4] Stabilising (strength={args.strength}) …")
     y_out = stabilize(y, sr, beat_times, warp_bpm, strength=args.strength)
+    _emit("warp", 0.90, "warped")
 
     # ── Intro trim ────────────────────────────────────────────────────────────
     # After warping, the first beat is still at beat_times[0] seconds (stabilize
@@ -372,6 +405,7 @@ def main() -> None:
     print(f"\nSaving …")
     saved_path = save_audio(args.output, y_out, sr)
     write_bpm_sidecar(saved_path, target_bpm)
+    _emit("save", 1.0, "done")
     print("\nDone.")
 
 

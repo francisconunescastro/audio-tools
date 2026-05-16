@@ -13,13 +13,41 @@ Run with the demucs venv:
 On first run, Demucs downloads the model weights (~80–320 MB, cached afterwards).
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting (enabled by --progress-json; no-op otherwise)
+# ---------------------------------------------------------------------------
+
+_PROGRESS_JSON = False
+
+
+def _emit(sub: str, pct: float, msg: str | None = None) -> None:
+    """Emit a single PROGRESS JSON line on stdout (local 0.0–1.0)."""
+    if not _PROGRESS_JSON:
+        return
+    payload = {"sub": sub, "pct": float(pct)}
+    if msg:
+        payload["msg"] = msg
+    sys.stdout.write(f"PROGRESS {json.dumps(payload)}\n")
+    sys.stdout.flush()
+
+
+# Demucs prints tqdm progress on stderr like:
+#   " 23%|██▎       | 23/100 [00:..]"
+# Capture the percentage at the start of each line.
+_TQDM_PCT = re.compile(r"(\d+)%\|")
 
 
 MODELS = {
@@ -46,9 +74,46 @@ def split(input_path: str, output_dir: str, model: str, wanted_stems: set[str] |
         ]
         print(f"  Model : {model}")
         print(f"  Loading model … (first run downloads weights, subsequent runs are instant)")
-        result = subprocess.run(cmd)
-        if result.returncode != 0:
-            sys.exit(f"Demucs failed (exit {result.returncode}).")
+        _emit("demucs", 0.02, "starting demucs")
+
+        # Stream demucs' tqdm output on stderr, parse percentages, re-emit
+        # PROGRESS events. Pass stdout through unchanged.
+        if _PROGRESS_JSON:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=None,            # inherit
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            last_pct = 0.0
+            buf = bytearray()
+            assert proc.stderr is not None
+            while True:
+                ch = proc.stderr.read(1)
+                if not ch:
+                    break
+                if ch in (b"\n", b"\r"):
+                    line = buf.decode("utf-8", errors="replace")
+                    sys.stderr.write(line + ch.decode("utf-8", errors="replace"))
+                    sys.stderr.flush()
+                    m = _TQDM_PCT.search(line)
+                    if m:
+                        pct = int(m.group(1)) / 100.0
+                        # Map demucs 0..100 → 0.05..0.98 so we don't claim done before files are moved
+                        scaled = 0.05 + pct * 0.93
+                        if scaled > last_pct + 0.01:
+                            last_pct = scaled
+                            _emit("demucs", scaled)
+                    buf.clear()
+                else:
+                    buf.append(ch[0])
+            ret = proc.wait()
+            if ret != 0:
+                sys.exit(f"Demucs failed (exit {ret}).")
+        else:
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                sys.exit(f"Demucs failed (exit {result.returncode}).")
 
         # Demucs outputs to: {tmp}/{model}/{track_name}/{stem}.wav
         track_name = Path(input_path).stem
@@ -94,11 +159,15 @@ Examples:
                    help="Demucs model to use (default: htdemucs_6s)")
     p.add_argument("--stems",  default=None,
                    help="Comma-separated stems to keep e.g. 'vocals,drums' (default: all)")
+    p.add_argument("--progress-json", action="store_true", dest="progress_json",
+                   help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
 
 
 def main() -> None:
+    global _PROGRESS_JSON
     args = parse_args()
+    _PROGRESS_JSON = args.progress_json
 
     if not os.path.isfile(args.input):
         sys.exit(f"File not found: {args.input}")
@@ -119,6 +188,7 @@ def main() -> None:
     print()
 
     files = split(args.input, output_dir, args.model, wanted)
+    _emit("demucs", 1.0, "done")
 
     print(f"\nDone — {len(files)} stem(s) written to {output_dir}/")
 
