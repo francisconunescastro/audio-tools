@@ -10,6 +10,7 @@ type Status = {
   stage: string;
   filename: string;
   elapsedMs: number;
+  lastUpdateMs: number;
   error: { exitCode: number | null; stderrTail: string } | null;
 };
 
@@ -22,6 +23,9 @@ const STAGE_LABELS: Record<string, string> = {
   done:      "Done",
 };
 
+const STALE_WARN_MS = 15_000;   // show "no updates for X" warning
+const STALE_BAD_MS  = 60_000;   // promote cancel button to primary
+
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
@@ -29,11 +33,20 @@ function formatElapsed(ms: number): string {
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
 
+function formatAgo(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 5) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s ago`;
+}
+
 export default function ProcessingPage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const [status, setStatus] = useState<Status | null>(null);
   const [notFound, setNotFound] = useState(false);
-  const [tick, setTick] = useState(0); // forces elapsed re-render
+  const [tick, setTick] = useState(0);
+  const [cancelling, setCancelling] = useState(false);
   const finishedRef = useRef(false);
 
   // Poll status every 1s while not finished.
@@ -63,7 +76,8 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
     return () => { cancelled = true; clearInterval(id); };
   }, [params.id, router]);
 
-  // Tick the elapsed clock every second.
+  // Tick every second so derived display values (elapsed, "Xs ago") refresh
+  // between polls instead of jumping in 1-second steps.
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
@@ -81,6 +95,21 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [status?.state]);
+
+  async function handleCancel() {
+    if (cancelling) return;
+    const ok = window.confirm("Cancel this job? The current processing will be killed and cannot be resumed.");
+    if (!ok) return;
+    setCancelling(true);
+    try {
+      await fetch(`/api/jobs/${params.id}/cancel`, { method: "POST" });
+      // Status will flip to "error" on the next poll; let the error view render.
+    } catch {
+      // ignore — next poll will reflect server state
+    } finally {
+      setCancelling(false);
+    }
+  }
 
   if (notFound) {
     return (
@@ -106,9 +135,12 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
     return <ErrorView status={status} />;
   }
 
-  // `tick` is read to force a re-render every second so the elapsed clock advances
-  // between status polls; the value itself isn't used.
+  // Derive a live "ms since last server update" — the server sends a snapshot
+  // each poll, but tick keeps it visually advancing between polls.
   void tick;
+  const liveLastUpdateMs = status.lastUpdateMs + (Date.now() % 1000); // smooth flicker
+  const isStale     = status.state === "running" && status.lastUpdateMs > STALE_WARN_MS;
+  const isVeryStale = status.state === "running" && status.lastUpdateMs > STALE_BAD_MS;
 
   const label = STAGE_LABELS[status.stage] ?? status.stage;
   const pct = Math.max(0, Math.min(100, status.pct));
@@ -134,7 +166,39 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
           </div>
           <div className="flex justify-between text-xs text-neutral-500">
             <span>Elapsed: {formatElapsed(status.elapsedMs)}</span>
-            <span className="font-mono">{status.state}</span>
+            <span className="font-mono tabular-nums">
+              Last update: {formatAgo(liveLastUpdateMs)}
+            </span>
+          </div>
+        </div>
+
+        {isVeryStale && (
+          <div className="rounded-lg border border-red-300 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200 px-4 py-3 text-sm space-y-2">
+            <div><strong>No updates for over a minute.</strong> The job may be stuck. Cancelling and retrying is usually the safest option.</div>
+          </div>
+        )}
+        {isStale && !isVeryStale && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 px-4 py-3 text-sm">
+            <strong>Quiet for {Math.round(status.lastUpdateMs / 1000)}s.</strong> Beat detection and stem splitting can take a while on long files — give it another moment, or cancel below.
+          </div>
+        )}
+
+        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 px-4 py-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-neutral-600 dark:text-neutral-400">
+              State: <span className="font-mono">{status.state}</span>
+            </span>
+            <button
+              onClick={handleCancel}
+              disabled={cancelling}
+              className={
+                isVeryStale
+                  ? "rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-3 py-1.5 text-sm font-medium"
+                  : "rounded-md border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50 px-3 py-1.5 text-sm"
+              }
+            >
+              {cancelling ? "Cancelling…" : "Cancel job"}
+            </button>
           </div>
         </div>
 

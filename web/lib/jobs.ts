@@ -18,6 +18,11 @@ export type JobStatus = {
   startedAt: string;
   finishedAt: string | null;
   error: { exitCode: number | null; stderrTail: string } | null;
+  // pid of the spawned Python process group leader (null until spawn, or once cleared)
+  pid: number | null;
+  // ISO timestamp of the last Node-side activity (heartbeat or PROGRESS event).
+  // The UI uses this to surface staleness independently of pct/stage changes.
+  lastHeartbeatAt: string | null;
 };
 
 export function jobDir(id: string): string {
@@ -44,7 +49,7 @@ export async function ensureJobsRoot(): Promise<void> {
   await fs.mkdir(JOBS_ROOT, { recursive: true });
 }
 
-export async function createJob(init: Omit<JobStatus, "state" | "pct" | "stage" | "startedAt" | "finishedAt" | "error">): Promise<JobStatus> {
+export async function createJob(init: Omit<JobStatus, "state" | "pct" | "stage" | "startedAt" | "finishedAt" | "error" | "pid" | "lastHeartbeatAt">): Promise<JobStatus> {
   const status: JobStatus = {
     ...init,
     state: "queued",
@@ -53,6 +58,8 @@ export async function createJob(init: Omit<JobStatus, "state" | "pct" | "stage" 
     startedAt: new Date().toISOString(),
     finishedAt: null,
     error: null,
+    pid: null,
+    lastHeartbeatAt: new Date().toISOString(),
   };
   await fs.mkdir(jobDir(init.id), { recursive: true });
   await fs.mkdir(outputDir(init.id), { recursive: true });
@@ -72,17 +79,30 @@ export async function readStatus(id: string): Promise<JobStatus | null> {
 }
 
 export async function writeStatus(status: JobStatus): Promise<void> {
-  const tmp = statusPath(status.id) + ".tmp";
+  // Per-call unique temp filename — multiple writers that overlapped on a
+  // shared `.tmp` path previously produced corrupted status.json files
+  // (a complete JSON followed by trailing fragments of another write).
+  const tmp = `${statusPath(status.id)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(status, null, 2), "utf8");
   await fs.rename(tmp, statusPath(status.id));
 }
 
+// Per-job write chains: each updateStatus call queues behind the previous one
+// for the same id so we never get a lost-update / read-modify-write race.
+const writeChains = new Map<string, Promise<unknown>>();
+
 export async function updateStatus(id: string, patch: Partial<JobStatus>): Promise<JobStatus | null> {
-  const current = await readStatus(id);
-  if (!current) return null;
-  const next: JobStatus = { ...current, ...patch };
-  await writeStatus(next);
-  return next;
+  const run = async (): Promise<JobStatus | null> => {
+    const current = await readStatus(id);
+    if (!current) return null;
+    const next: JobStatus = { ...current, ...patch };
+    await writeStatus(next);
+    return next;
+  };
+  const prev = writeChains.get(id) ?? Promise.resolve();
+  const chained = prev.catch(() => null).then(run);
+  writeChains.set(id, chained);
+  return chained;
 }
 
 export async function listJobs(): Promise<string[]> {

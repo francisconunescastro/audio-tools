@@ -34,8 +34,39 @@ export function labelForStage(stage: string): string {
 
 type SpawnedChild = ChildProcessByStdio<null, Readable, Readable>;
 let activeChild: SpawnedChild | null = null;
+let activeChildPid: number | null = null;
 let activeJobId: string | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
 const queue: string[] = [];
+// IDs of jobs the user explicitly cancelled — checked when the child exits
+// so we report "Cancelled by user" instead of a misleading exit code 143.
+const cancelledIds = new Set<string>();
+
+function startHeartbeat(id: string): void {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (activeJobId !== id) return;
+    void updateStatus(id, { lastHeartbeatAt: new Date().toISOString() }).catch(() => {});
+  }, 2000);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!pid) return false;
+  try {
+    // Signal 0 = no-op probe; throws ESRCH if the process is gone.
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Pick the Python interpreter that has the beat-stabilizer deps installed.
@@ -106,17 +137,21 @@ function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[
 }
 
 // On module load: mark orphaned "running" jobs as error, re-queue any "queued" jobs.
+// A "running" job whose PID is no longer alive (server restart, OS reboot, manual
+// kill) cannot be resumed — Python pipelines aren't checkpointed — so we surface
+// an explicit error and free the queue slot.
 void (async () => {
   const ids = await listJobs().catch(() => [] as string[]);
   const toQueue: Array<{ id: string; startedAt: string }> = [];
   for (const id of ids) {
     const status = await readStatus(id).catch(() => null);
     if (!status) continue;
-    if (status.state === "running") {
+    if (status.state === "running" && !isProcessAlive(status.pid)) {
       await updateStatus(id, {
         state: "error",
-        error: { exitCode: null, stderrTail: "Server was restarted while this job was running." },
+        error: { exitCode: null, stderrTail: "Server was restarted while this job was running. Please try again." },
         finishedAt: new Date().toISOString(),
+        pid: null,
       }).catch(() => {});
     } else if (status.state === "queued") {
       toQueue.push({ id, startedAt: status.startedAt });
@@ -127,6 +162,72 @@ void (async () => {
     .forEach(({ id }) => { if (!queue.includes(id)) queue.push(id); });
   void pumpQueue();
 })();
+
+/**
+ * Cancel a queued or running job.
+ *
+ * For queued jobs: removes the id from the in-memory queue and marks the
+ * status.json as error.
+ *
+ * For the actively-running job: sends SIGTERM to the entire process group
+ * (which catches madmom's nested subprocess and Demucs workers) and follows
+ * up with SIGKILL after 3 s if the group is still alive. The id is recorded
+ * in `cancelledIds` so the runJob close handler labels the result as
+ * "Cancelled by user" instead of reporting exit code 143.
+ */
+export async function cancelJob(id: string): Promise<boolean> {
+  const status = await readStatus(id);
+  if (!status) return false;
+  if (status.state === "done" || status.state === "error") return false;
+
+  if (status.state === "queued") {
+    const idx = queue.indexOf(id);
+    if (idx >= 0) queue.splice(idx, 1);
+    await updateStatus(id, {
+      state: "error",
+      error: { exitCode: null, stderrTail: "Cancelled by user." },
+      finishedAt: new Date().toISOString(),
+      pid: null,
+    });
+    return true;
+  }
+
+  // Running
+  cancelledIds.add(id);
+  const pid = activeJobId === id ? activeChildPid : status.pid;
+  if (pid && isProcessAlive(pid)) {
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      // Group may not exist (e.g., detached:false fallback); try direct pid.
+      try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
+    }
+    setTimeout(() => {
+      if (pid && isProcessAlive(pid)) {
+        try { process.kill(-pid, "SIGKILL"); } catch {
+          try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+        }
+      }
+    }, 3000);
+  } else {
+    // PID already dead but state still "running" — mark error immediately.
+    cancelledIds.delete(id);
+    stopHeartbeat();
+    if (activeJobId === id) {
+      activeJobId = null;
+      activeChild = null;
+      activeChildPid = null;
+    }
+    await updateStatus(id, {
+      state: "error",
+      error: { exitCode: null, stderrTail: "Cancelled by user (process was already dead)." },
+      finishedAt: new Date().toISOString(),
+      pid: null,
+    });
+    void pumpQueue();
+  }
+  return true;
+}
 
 export function startOrQueue(id: string): void {
   if (activeJobId) {
@@ -164,22 +265,31 @@ async function runJob(id: string): Promise<void> {
   const args = settingsToArgs(status.settings, outDir, inputPath);
   const stderrStream = createWriteStream(stderrPath(id), { flags: "a" });
 
-  await updateStatus(id, { state: "running", pct: 0, stage: "start" });
-
   const pythonExe = resolvePythonExecutable();
   const child = spawn(pythonExe, args, {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      // Suppress Python 3.13+ colorized traceback so ANSI codes don't end up
-      // in the stderr tail rendered on the error screen.
       NO_COLOR: "1",
       PYTHON_COLORS: "0",
       FORCE_COLOR: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
+    // Put the child in its own process group so we can SIGTERM the whole
+    // tree (madmom subprocess, Demucs workers) with `kill(-pgid, ...)`.
+    detached: true,
   }) as SpawnedChild;
   activeChild = child;
+  activeChildPid = child.pid ?? null;
+
+  await updateStatus(id, {
+    state: "running",
+    pct: 0,
+    stage: "start",
+    pid: child.pid ?? null,
+    lastHeartbeatAt: new Date().toISOString(),
+  });
+  startHeartbeat(id);
 
   // Stderr → log file
   child.stderr.pipe(stderrStream);
@@ -198,6 +308,7 @@ async function runJob(id: string): Promise<void> {
         if (typeof payload.pct === "number") {
           const patch: Partial<JobStatus> = {
             pct: clamp(payload.pct, 0, 100),
+            lastHeartbeatAt: new Date().toISOString(),
           };
           if (payload.stage) patch.stage = payload.stage;
           void updateStatus(id, patch);
@@ -212,9 +323,20 @@ async function runJob(id: string): Promise<void> {
     child.on("close", (code) => resolve(code ?? 1));
   });
   stderrStream.end();
+  stopHeartbeat();
   activeChild = null;
+  activeChildPid = null;
 
-  if (exit === 0) {
+  const wasCancelled = cancelledIds.delete(id);
+
+  if (wasCancelled) {
+    await updateStatus(id, {
+      state: "error",
+      error: { exitCode: null, stderrTail: "Cancelled by user." },
+      finishedAt: new Date().toISOString(),
+      pid: null,
+    });
+  } else if (exit === 0) {
     try {
       await fs.mkdir(outDir, { recursive: true });
       await zipDirectory(outDir, zipPath(id));
@@ -223,12 +345,14 @@ async function runJob(id: string): Promise<void> {
         pct: 100,
         stage: "done",
         finishedAt: new Date().toISOString(),
+        pid: null,
       });
     } catch (err) {
       await updateStatus(id, {
         state: "error",
         error: { exitCode: 0, stderrTail: `ZIP failed: ${err}` },
         finishedAt: new Date().toISOString(),
+        pid: null,
       });
     }
   } else {
@@ -237,6 +361,7 @@ async function runJob(id: string): Promise<void> {
       state: "error",
       error: { exitCode: exit, stderrTail: tail },
       finishedAt: new Date().toISOString(),
+      pid: null,
     });
   }
 
