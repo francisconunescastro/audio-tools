@@ -19,3 +19,5 @@ web/node_modules/
 web/.next/
 web/jobs/
 web/.env*.local
+web/tsconfig.tsbuildinfo
+web/next-env.d.ts
