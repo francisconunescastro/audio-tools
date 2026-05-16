@@ -332,6 +332,10 @@ async function runJob(id: string): Promise<void> {
   // 150 MB+). Without this, the GET liveness check sees state="running" with
   // a now-dead pid and flips the job to error, briefly flashing a false-
   // positive crash screen right before "Processing complete".
+  //
+  // The heartbeat is then restarted so the UI doesn't drift into "Quiet for
+  // Xs" warnings during a long zip — finalize is a known sparse phase but
+  // it's still actively progressing.
   if (exit === 0 && !wasCancelled) {
     await updateStatus(id, {
       stage: "finalize",
@@ -339,6 +343,7 @@ async function runJob(id: string): Promise<void> {
       pid: null,
       lastHeartbeatAt: new Date().toISOString(),
     });
+    startHeartbeat(id);
   }
 
   if (wasCancelled) {
@@ -377,6 +382,7 @@ async function runJob(id: string): Promise<void> {
     });
   }
 
+  stopHeartbeat();
   activeJobId = null;
   void pumpQueue();
 }

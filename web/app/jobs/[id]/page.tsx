@@ -140,8 +140,12 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
   // each poll, but tick keeps it visually advancing between polls.
   void tick;
   const liveLastUpdateMs = status.lastUpdateMs + (Date.now() % 1000); // smooth flicker
-  const isStale     = status.state === "running" && status.lastUpdateMs > STALE_WARN_MS;
-  const isVeryStale = status.state === "running" && status.lastUpdateMs > STALE_BAD_MS;
+  // The "finalize" stage zips the output and can take 5–30 s on large files
+  // without producing fine-grained progress events. Suppress the stale-update
+  // warnings during it — we're knowingly in a sparse-update phase, not stuck.
+  const inFinalize    = status.stage === "finalize";
+  const isStale       = status.state === "running" && !inFinalize && status.lastUpdateMs > STALE_WARN_MS;
+  const isVeryStale   = status.state === "running" && !inFinalize && status.lastUpdateMs > STALE_BAD_MS;
 
   const label = STAGE_LABELS[status.stage] ?? status.stage;
   const pct = Math.max(0, Math.min(100, status.pct));
