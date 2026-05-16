@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
@@ -35,6 +35,28 @@ type SpawnedChild = ChildProcessByStdio<null, Readable, Readable>;
 let activeChild: SpawnedChild | null = null;
 let activeJobId: string | null = null;
 const queue: string[] = [];
+
+/**
+ * Pick the Python interpreter that has the beat-stabilizer deps installed.
+ *
+ * setup.sh's Phase 2 runs `python3 -m pip install -r requirements.txt`. On
+ * macOS that resolves to /usr/bin/python3 (Apple's CommandLineTools), not
+ * the Homebrew python that ends up first on PATH after `brew install
+ * python@3.11`. When Next.js inherits the wrong PATH, spawning bare
+ * "python3" picks the Homebrew one and beat_stabilizer.py fails with
+ * `ModuleNotFoundError: No module named 'numpy'`.
+ *
+ * Resolution order:
+ *   1. $AUDIO_TOOLS_PYTHON (explicit user override)
+ *   2. /usr/bin/python3 if present (the binary setup.sh wrote deps into)
+ *   3. fall back to "python3" on PATH
+ */
+function resolvePythonExecutable(): string {
+  const override = process.env.AUDIO_TOOLS_PYTHON;
+  if (override && existsSync(override)) return override;
+  if (existsSync("/usr/bin/python3")) return "/usr/bin/python3";
+  return "python3";
+}
 
 function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[] {
   const args: string[] = [
@@ -120,9 +142,17 @@ async function runJob(id: string): Promise<void> {
 
   await updateStatus(id, { state: "running", pct: 0, stage: "start" });
 
-  const child = spawn("python3", args, {
+  const pythonExe = resolvePythonExecutable();
+  const child = spawn(pythonExe, args, {
     cwd: REPO_ROOT,
-    env: process.env,
+    env: {
+      ...process.env,
+      // Suppress Python 3.13+ colorized traceback so ANSI codes don't end up
+      // in the stderr tail rendered on the error screen.
+      NO_COLOR: "1",
+      PYTHON_COLORS: "0",
+      FORCE_COLOR: "0",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   }) as SpawnedChild;
   activeChild = child;
@@ -190,10 +220,15 @@ async function runJob(id: string): Promise<void> {
   void pumpQueue();
 }
 
+// Strip ANSI escape sequences (color codes, cursor moves) so they don't
+// leak into the error view as literal "[35m..." text.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\[[0-9;]*[A-Za-z]/g;
+
 async function tailFile(filePath: string, lines: number): Promise<string> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
-    const all = raw.split("\n");
+    const all = raw.replace(ANSI_RE, "").split("\n");
     return all.slice(Math.max(0, all.length - lines)).join("\n");
   } catch {
     return "";
