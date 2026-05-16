@@ -66,6 +66,7 @@ export async function readStatus(id: string): Promise<JobStatus | null> {
     return JSON.parse(raw) as JobStatus;
   } catch (err: unknown) {
     if (isENoEnt(err)) return null;
+    if (err instanceof SyntaxError) return null; // corrupted status.json — treat as missing
     throw err;
   }
 }

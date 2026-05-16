@@ -7,6 +7,7 @@ import readline from "node:readline";
 
 import {
   jobDir,
+  listJobs,
   outputDir,
   readStatus,
   stderrPath,
@@ -103,6 +104,29 @@ function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[
 
   return args;
 }
+
+// On module load: mark orphaned "running" jobs as error, re-queue any "queued" jobs.
+void (async () => {
+  const ids = await listJobs().catch(() => [] as string[]);
+  const toQueue: Array<{ id: string; startedAt: string }> = [];
+  for (const id of ids) {
+    const status = await readStatus(id).catch(() => null);
+    if (!status) continue;
+    if (status.state === "running") {
+      await updateStatus(id, {
+        state: "error",
+        error: { exitCode: null, stderrTail: "Server was restarted while this job was running." },
+        finishedAt: new Date().toISOString(),
+      }).catch(() => {});
+    } else if (status.state === "queued") {
+      toQueue.push({ id, startedAt: status.startedAt });
+    }
+  }
+  toQueue
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    .forEach(({ id }) => { if (!queue.includes(id)) queue.push(id); });
+  void pumpQueue();
+})();
 
 export function startOrQueue(id: string): void {
   if (activeJobId) {
