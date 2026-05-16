@@ -192,39 +192,36 @@ export async function cancelJob(id: string): Promise<boolean> {
     return true;
   }
 
-  // Running
-  cancelledIds.add(id);
-  const pid = activeJobId === id ? activeChildPid : status.pid;
-  if (pid && isProcessAlive(pid)) {
+  // Running.
+  // SAFETY: only kill if this Node process is actively running this job and
+  // the in-memory pid matches the spawned child. We never trust an on-disk
+  // pid alone — a stale/corrupted status.json could otherwise let us signal
+  // an unrelated process owned by the same user.
+  if (activeJobId === id && activeChild && activeChildPid) {
+    cancelledIds.add(id);
+    const pid = activeChildPid;
     try {
       process.kill(-pid, "SIGTERM");
     } catch {
-      // Group may not exist (e.g., detached:false fallback); try direct pid.
       try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
     }
     setTimeout(() => {
-      if (pid && isProcessAlive(pid)) {
+      if (isProcessAlive(pid)) {
         try { process.kill(-pid, "SIGKILL"); } catch {
           try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
         }
       }
     }, 3000);
+    // runJob's close handler will see cancelledIds and write the final status.
   } else {
-    // PID already dead but state still "running" — mark error immediately.
-    cancelledIds.delete(id);
-    stopHeartbeat();
-    if (activeJobId === id) {
-      activeJobId = null;
-      activeChild = null;
-      activeChildPid = null;
-    }
+    // Orphaned: state says "running" but this Node isn't tracking it (server
+    // was restarted, or status.json is stale). Just mark as error, no signal.
     await updateStatus(id, {
       state: "error",
-      error: { exitCode: null, stderrTail: "Cancelled by user (process was already dead)." },
+      error: { exitCode: null, stderrTail: "Cancelled by user (job was orphaned)." },
       finishedAt: new Date().toISOString(),
       pid: null,
     });
-    void pumpQueue();
   }
   return true;
 }
