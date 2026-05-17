@@ -69,6 +69,9 @@ Examples:
     p.set_defaults(trim_intro=True)
     stab.add_argument("--beats-per-bar",  type=int, default=4, dest="beats_per_bar",
                       help="Beats per bar for the intro trim length (default: 4)")
+    stab.add_argument("--allow-tempo-change", action="store_true", dest="allow_tempo_change",
+                      help="Continue even if a sustained tempo change is detected. "
+                           "Default behaviour is to stop with EARLY_STOP so the caller can warn.")
 
     # ── Chord chart ─────────────────────────────────────────
     chart = p.add_argument_group("Chord chart")
@@ -258,6 +261,7 @@ def main() -> None:
         if args.strength != 1.0:    cmd += ["--strength",      str(args.strength)]
         if not args.trim_intro:     cmd += ["--no-trim-intro"]
         if args.beats_per_bar != 4: cmd += ["--beats-per-bar", str(args.beats_per_bar)]
+        if args.allow_tempo_change: cmd += ["--allow-tempo-change"]
         if _PROGRESS_JSON:          cmd += ["--progress-json"]
         run_with_progress(
             cmd, "STEP 1 / 3  —  Beat Stabilization",

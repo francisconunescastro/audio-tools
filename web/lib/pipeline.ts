@@ -107,6 +107,7 @@ function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[
   if (s.strength !== undefined && s.strength !== 1.0) args.push("--strength", String(s.strength));
   if (s.trimIntro === false)    args.push("--no-trim-intro");
   if (s.beatsPerBar && s.beatsPerBar !== 4) args.push("--beats-per-bar", String(s.beatsPerBar));
+  if (s.allowTempoChange)       args.push("--allow-tempo-change");
 
   // Chord chart
   if (s.key && s.key !== "auto") args.push("--key", s.key);
@@ -292,7 +293,17 @@ async function runJob(id: string): Promise<void> {
   // Stderr → log file
   child.stderr.pipe(stderrStream);
 
-  // Stdout → parse PROGRESS lines
+  // Stdout → parse PROGRESS + EARLY_STOP lines.
+  // EARLY_STOP is the pipeline's structured way of saying "I bailed and here's
+  // why" — currently used for tempo-change detection in beat_stabilizer.py.
+  // We capture the payload here and surface it on the non-zero exit path
+  // below, so the UI shows a dedicated error message instead of stderr tail.
+  type EarlyStop = { kind: "tempo_change"; details: Record<string, unknown> };
+  // TS narrows `let x: T | null = null` to `null` outside of closures because
+  // assignments inside the readline callback don't flow into the outer scope's
+  // type analysis. Use a holder object so the narrowing happens on the field
+  // (which TS can't narrow across writes via closure).
+  const stopRef: { value: EarlyStop | null } = { value: null };
   const rl = readline.createInterface({ input: child.stdout });
   rl.on("line", (line) => {
     stderrStream.write(line + "\n");
@@ -310,6 +321,20 @@ async function runJob(id: string): Promise<void> {
           };
           if (payload.stage) patch.stage = payload.stage;
           void updateStatus(id, patch);
+        }
+      } catch {
+        // ignore malformed
+      }
+    } else if (line.startsWith("EARLY_STOP ")) {
+      try {
+        const payload = JSON.parse(line.slice("EARLY_STOP ".length)) as {
+          reason?: string;
+          [k: string]: unknown;
+        };
+        if (payload.reason === "tempo_change") {
+          const { reason, ...details } = payload;
+          void reason;
+          stopRef.value = { kind: "tempo_change", details };
         }
       } catch {
         // ignore malformed
@@ -374,9 +399,12 @@ async function runJob(id: string): Promise<void> {
     }
   } else {
     const tail = await tailFile(stderrPath(id), 40);
+    const es = stopRef.value;
     await updateStatus(id, {
       state: "error",
-      error: { exitCode: exit, stderrTail: tail },
+      error: es
+        ? { exitCode: exit, stderrTail: tail, kind: es.kind, details: es.details }
+        : { exitCode: exit, stderrTail: tail },
       finishedAt: new Date().toISOString(),
       pid: null,
     });

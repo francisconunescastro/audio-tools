@@ -3,6 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+type TempoChangeDetails = {
+  from_bpm?: number;
+  to_bpm?: number;
+  at_bar?: number;
+  at_time_s?: number;
+};
+
 type Status = {
   id: string;
   state: "queued" | "running" | "done" | "error";
@@ -11,7 +18,12 @@ type Status = {
   filename: string;
   elapsedMs: number;
   lastUpdateMs: number;
-  error: { exitCode: number | null; stderrTail: string } | null;
+  error: {
+    exitCode: number | null;
+    stderrTail: string;
+    kind?: "tempo_change";
+    details?: TempoChangeDetails;
+  } | null;
 };
 
 const STAGE_LABELS: Record<string, string> = {
@@ -216,6 +228,12 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
 }
 
 function ErrorView({ status }: { status: Status }) {
+  // Structured early-stop signals (currently: tempo_change) render a dedicated
+  // explanation instead of dumping the stderr tail. Stops the user staring at
+  // a Python traceback and wondering what's wrong with their song.
+  if (status.error?.kind === "tempo_change") {
+    return <TempoChangeErrorView status={status} />;
+  }
   return (
     <main className="min-h-screen flex justify-center px-4 py-10">
       <div className="w-full max-w-2xl space-y-4">
@@ -235,6 +253,70 @@ function ErrorView({ status }: { status: Status }) {
         >
           Try again
         </a>
+      </div>
+    </main>
+  );
+}
+
+function TempoChangeErrorView({ status }: { status: Status }) {
+  const d = (status.error?.details ?? {}) as TempoChangeDetails;
+  const from = d.from_bpm !== undefined ? Math.round(d.from_bpm) : null;
+  const to   = d.to_bpm   !== undefined ? Math.round(d.to_bpm)   : null;
+  const bar  = d.at_bar;
+  const t    = d.at_time_s;
+
+  return (
+    <main className="min-h-screen flex justify-center px-4 py-10">
+      <div className="w-full max-w-2xl space-y-5">
+        <h1 className="text-2xl font-semibold">This song has a tempo change</h1>
+        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 px-4 py-3 text-sm space-y-2">
+          {from !== null && to !== null && bar !== undefined ? (
+            <p>
+              Detected ~<strong>{from} BPM</strong> through bar <strong>{bar}</strong>,
+              then ~<strong>{to} BPM</strong>
+              {t !== undefined ? <> (≈ {t.toFixed(1)}s)</> : null}.
+            </p>
+          ) : (
+            <p>A sustained tempo change was detected mid-song.</p>
+          )}
+          <p>
+            Beat stabilization assumes a single tempo and would warp this incorrectly.
+            The audio would come out audibly broken across the boundary.
+          </p>
+        </div>
+
+        <div className="space-y-3 text-sm">
+          <p className="text-neutral-700 dark:text-neutral-300 font-medium">What to do:</p>
+          <ul className="list-disc pl-5 space-y-1 text-neutral-700 dark:text-neutral-300">
+            <li>
+              <strong>Split the song</strong> at the section boundary
+              {t !== undefined ? <> (around {t.toFixed(1)}s)</> : null} and run each
+              half separately.
+            </li>
+            <li>
+              <strong>Or proceed anyway</strong>: re-upload with{" "}
+              <em>Allow tempo change</em> enabled in advanced settings — the warp will
+              be wrong across the boundary, but the chord chart and stems will still
+              process.
+            </li>
+          </ul>
+        </div>
+
+        <div className="flex gap-3 pt-2">
+          <a
+            href="/"
+            className="inline-block rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm"
+          >
+            Back to upload
+          </a>
+        </div>
+
+        <details className="text-xs text-neutral-500">
+          <summary className="cursor-pointer">Show pipeline output</summary>
+          <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-neutral-900 text-neutral-100 p-3 font-mono whitespace-pre-wrap">
+            {status.error?.stderrTail || "(no stderr captured)"}
+          </pre>
+        </details>
       </div>
     </main>
   );

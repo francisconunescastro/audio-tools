@@ -16,6 +16,11 @@ export const SettingsSchema = z.object({
   trimIntro: z.boolean().optional(),
   beatsPerBar: z.number().int().min(2).max(12).optional(),
   skipStabilize: z.boolean().optional(),
+  // Bypass the arrangement-level tempo-change guard. Default false — when a
+  // sustained tempo shift is detected the pipeline stops with an EARLY_STOP
+  // and the UI shows a dedicated error. Set true if you accept that the
+  // warp will be musically wrong across the tempo boundary.
+  allowTempoChange: z.boolean().optional(),
 
   // Chord chart
   key: z.string().trim().max(40).optional(),

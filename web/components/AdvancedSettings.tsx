@@ -11,6 +11,7 @@ export type AdvancedState = {
   trimIntro: boolean;
   beatsPerBar: string;
   skipStabilize: boolean;
+  allowTempoChange: boolean;
 
   // Chord chart
   key: string;
@@ -48,6 +49,7 @@ export const DEFAULT_ADVANCED: AdvancedState = {
   trimIntro: true,
   beatsPerBar: "4",
   skipStabilize: false,
+  allowTempoChange: false,
 
   key: "auto",
   timeSig: "",
@@ -114,6 +116,18 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
             <Check label="Trim intro to one bar before beat 1" checked={value.trimIntro} onChange={(v) => patch("trimIntro", v)} />
             <Check label="Skip stabilization" checked={value.skipStabilize} onChange={(v) => patch("skipStabilize", v)} />
           </Row>
+          <Row>
+            <Check
+              label="Allow tempo change (skip the multi-tempo guard)"
+              checked={value.allowTempoChange}
+              onChange={(v) => patch("allowTempoChange", v)}
+            />
+          </Row>
+          <p className="text-xs text-neutral-500 -mt-1">
+            By default we stop processing if the song has a sustained tempo change (e.g. ballad → chorus bump),
+            because the single-tempo warp would mangle the audio across the boundary. Enable this if you want
+            to proceed anyway.
+          </p>
         </Section>
 
         <Section title="Chord chart">
@@ -255,6 +269,7 @@ export function toSettingsPayload(a: AdvancedState) {
     trimIntro: a.trimIntro,
     beatsPerBar: int(a.beatsPerBar),
     skipStabilize: a.skipStabilize || undefined,
+    allowTempoChange: a.allowTempoChange || undefined,
 
     key: a.key && a.key !== "auto" ? a.key : undefined,
     timeSig: int(a.timeSig),

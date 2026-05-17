@@ -137,56 +137,169 @@ def write_bpm_sidecar(audio_path: str, bpm: float) -> None:
 # Beat detection
 # ---------------------------------------------------------------------------
 
-def detect_beats_madmom(y_mono: np.ndarray, sr: int) -> np.ndarray:
+def detect_beats_madmom(
+    y_mono: np.ndarray,
+    sr: int,
+    bpb_options: list[int] | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, int | None]:
     """
-    Run madmom's RNN + DBN beat tracker.
+    Run madmom's RNN + DBN tracker, preferring the downbeat-aware version.
 
-    Tries venv_madmom via subprocess first (preferred — avoids import conflicts).
-    Falls back to a direct import if madmom happens to be installed in the
-    current environment.
+    Tries (in order):
+      1. `DBNDownBeatTrackingProcessor` with the candidate `bpb_options`
+         (defaults to [3, 4]) — gives us beat times, downbeat indices, and a
+         detected meter in a single pass.
+      2. `DBNBeatTrackingProcessor` if (1) errors — beats only, no downbeats.
+
+    Tries `venv_madmom` via subprocess first (preferred — avoids import
+    conflicts with the host Python). Falls back to a direct import only if
+    madmom happens to be installed in the active environment.
+
+    Returns
+    -------
+    beat_times       : (n_beats,)  seconds
+    downbeat_indices : (n_downbeats,) int — indices into beat_times where
+                        beat 1 falls; None if the downbeat tracker errored.
+    meter            : int beats-per-bar; None if not detected.
     """
     import json, subprocess
+
+    if bpb_options is None:
+        bpb_options = [3, 4]
 
     script_dir    = os.path.dirname(os.path.abspath(__file__))
     madmom_python = os.path.join(script_dir, "venv_madmom", "bin", "python3.11")
 
     if os.path.isfile(madmom_python):
-        # Write mono audio to a temp WAV so madmom can read it as a file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
         try:
             sf.write(tmp_path, y_mono.astype(np.float32), sr)
-            code = (
-                # Patch np.int / np.float etc. removed in NumPy 1.24 but still
-                # referenced in madmom's compiled Cython (hmm.pyx).
-                "import numpy as _np\n"
-                "_np.int = int; _np.float = float; _np.complex = complex\n"
-                "_np.bool = bool; _np.object = object; _np.str = str\n"
-                "import sys, json\n"
-                "from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor\n"
-                "from madmom.processors import SequentialProcessor\n"
-                "proc = SequentialProcessor([\n"
-                "    RNNBeatProcessor(),\n"
-                "    DBNBeatTrackingProcessor(fps=100),\n"
-                "])\n"
-                "beats = proc(sys.argv[1])\n"
-                "print(json.dumps(beats.tolist()))\n"
-            )
+            # The child script tries the downbeat tracker first and falls
+            # back to beats-only on failure. Output is JSON.
+            code = f"""
+# madmom pins are old enough that it imports MutableSequence/etc. directly
+# from `collections`, which Python 3.10+ moved to `collections.abc`. Patch
+# the names back onto `collections` before anything from madmom is imported.
+import collections, collections.abc
+for _name in ('MutableSequence', 'Mapping', 'MutableMapping', 'Iterable',
+              'Hashable', 'Callable', 'Sequence', 'Set', 'MutableSet'):
+    if not hasattr(collections, _name):
+        setattr(collections, _name, getattr(collections.abc, _name))
+import numpy as _np
+_np.int = int; _np.float = float; _np.complex = complex
+_np.bool = bool; _np.object = object; _np.str = str
+import sys, json
+import numpy as np
+import itertools as it
+
+audio = sys.argv[1]
+bpb = {bpb_options!r}
+
+# Monkey-patch DBNDownBeatTrackingProcessor.process(): the upstream
+# implementation does `np.asarray(results)[:, 1]` where results is a list of
+# (path_array, log_prob_float). NumPy >=1.20 refuses to coerce inhomogeneous
+# nested sequences into a uniform array, raising ValueError. We replace the
+# argmax with an explicit log-prob extraction and leave the rest of the
+# method byte-identical.
+from madmom.features.downbeats import DBNDownBeatTrackingProcessor, _process_dbn
+
+def _patched_process(self, activations, **kwargs):
+    first = 0
+    if self.threshold:
+        idx = np.nonzero(activations >= self.threshold)[0]
+        if idx.any():
+            first = max(first, int(np.min(idx)))
+            last = min(len(activations), int(np.max(idx)) + 1)
+        else:
+            last = first
+        activations = activations[first:last]
+    if not activations.any():
+        return np.empty((0, 2))
+    results = list(self.map(_process_dbn, zip(self.hmms, it.repeat(activations))))
+    log_probs = [r[1] for r in results]
+    best = int(np.argmax(log_probs))
+    path, _ = results[best]
+    st = self.hmms[best].transition_model.state_space
+    om = self.hmms[best].observation_model
+    positions = st.state_positions[path]
+    beat_numbers = positions.astype(int) + 1
+    if self.correct:
+        beats = np.empty(0, dtype=int)
+        beat_range = om.pointers[path] >= 1
+        idx = np.nonzero(np.diff(beat_range.astype(int)))[0] + 1
+        if beat_range[0]:
+            idx = np.r_[0, idx]
+        if beat_range[-1]:
+            idx = np.r_[idx, beat_range.size]
+        if idx.any():
+            for left, right in idx.reshape((-1, 2)):
+                peak = int(np.argmax(activations[left:right])) // 2 + left
+                beats = np.hstack((beats, peak))
+    else:
+        beats = np.nonzero(np.diff(beat_numbers))[0] + 1
+    return np.vstack(((beats + first) / float(self.fps),
+                      beat_numbers[beats])).T
+
+DBNDownBeatTrackingProcessor.process = _patched_process
+
+try:
+    from madmom.features.downbeats import RNNDownBeatProcessor
+    act = RNNDownBeatProcessor()(audio)
+    out = DBNDownBeatTrackingProcessor(beats_per_bar=bpb, fps=100)(act)
+    # out shape: (n, 2) — (time_seconds, position_in_bar_1_indexed)
+    arr = np.asarray(out)
+    beats = arr[:, 0].tolist()
+    positions = arr[:, 1].astype(int).tolist()
+    downbeat_idx = [i for i, p in enumerate(positions) if p == 1]
+    meter = max(positions) if positions else None
+    print(json.dumps({{
+        "beats": beats,
+        "downbeat_indices": downbeat_idx,
+        "meter": meter,
+        "tracker": "downbeat",
+    }}))
+except Exception as e:
+    # Fall back to the beats-only tracker.
+    from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
+    act = RNNBeatProcessor()(audio)
+    beats = DBNBeatTrackingProcessor(fps=100)(act)
+    print(json.dumps({{
+        "beats": np.asarray(beats).tolist(),
+        "downbeat_indices": None,
+        "meter": None,
+        "tracker": "beats_only",
+        "downbeat_error": repr(e)[:200],
+    }}), file=sys.stderr)
+    # Re-emit as JSON on stdout so the parent can read it.
+    print(json.dumps({{
+        "beats": np.asarray(beats).tolist(),
+        "downbeat_indices": None,
+        "meter": None,
+        "tracker": "beats_only",
+    }}))
+"""
             result = subprocess.run(
                 [madmom_python, "-c", code, tmp_path],
-                capture_output=True, text=True, timeout=180,
+                capture_output=True, text=True, timeout=240,
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr[-400:])
-            return np.array(json.loads(result.stdout.strip()), dtype=float)
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            beats = np.array(payload["beats"], dtype=float)
+            dbi   = (np.array(payload["downbeat_indices"], dtype=int)
+                     if payload["downbeat_indices"] is not None else None)
+            meter = payload.get("meter")
+            return beats, dbi, meter
         finally:
             os.unlink(tmp_path)
 
-    # Direct import fallback (only works when madmom is in the active env)
+    # Direct import fallback (only works when madmom is in the active env).
+    # Downbeat tracker is too heavy to attempt here without venv isolation.
     from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
     sig = y_mono.astype(np.float32)
     act = RNNBeatProcessor()(sig)
-    return np.asarray(DBNBeatTrackingProcessor(fps=100)(act), dtype=float)
+    return np.asarray(DBNBeatTrackingProcessor(fps=100)(act), dtype=float), None, None
 
 
 def detect_beats_librosa(y_mono: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
@@ -218,7 +331,18 @@ def _madmom_heartbeat(stop: threading.Event, duration_s: float) -> None:
         _emit("detect_beats", 0.16 + frac * (0.48 - 0.16))
 
 
-def detect_beats(y: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
+def detect_beats(
+    y: np.ndarray,
+    sr: int,
+    bpb_options: list[int] | None = None,
+) -> tuple[np.ndarray, float, np.ndarray | None, int | None]:
+    """
+    Beat (and downbeat, when available) detection.
+
+    Returns (beat_times, bpm, downbeat_indices, meter).
+    `downbeat_indices` and `meter` are None when the downbeat tracker
+    couldn't run or fell back to librosa.
+    """
     y_mono = y.mean(axis=1) if y.ndim == 2 else y
     duration_s = (len(y) if y.ndim == 1 else y.shape[0]) / sr
 
@@ -230,10 +354,16 @@ def detect_beats(y: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
         t = None
 
     try:
-        beat_times = detect_beats_madmom(y_mono, sr)
+        beat_times, downbeat_indices, meter = detect_beats_madmom(
+            y_mono, sr, bpb_options=bpb_options,
+        )
         bpm = _bpm_from_times(beat_times)
-        print(f"  [madmom] {len(beat_times)} beats  |  {bpm:.2f} BPM")
-        return beat_times, bpm
+        if downbeat_indices is not None and meter is not None:
+            print(f"  [madmom] {len(beat_times)} beats, {len(downbeat_indices)} downbeats  "
+                  f"|  {bpm:.2f} BPM  |  meter ≈ {meter}/4")
+        else:
+            print(f"  [madmom] {len(beat_times)} beats  |  {bpm:.2f} BPM  (downbeats unavailable)")
+        return beat_times, bpm, downbeat_indices, meter
     except Exception as e:
         print(f"  [madmom] not available ({e}), falling back to librosa …")
     finally:
@@ -243,13 +373,122 @@ def detect_beats(y: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
 
     beat_times, bpm = detect_beats_librosa(y_mono, sr)
     print(f"  [librosa] {len(beat_times)} beats  |  {bpm:.2f} BPM")
-    return beat_times, bpm
+    return beat_times, bpm, None, None
 
 
 def _bpm_from_times(beat_times: np.ndarray) -> float:
     if len(beat_times) < 2:
         return 120.0
     return float(60.0 / np.median(np.diff(beat_times)))
+
+
+# ---------------------------------------------------------------------------
+# Tempo-change detection (arrangement-level, not jitter)
+# ---------------------------------------------------------------------------
+
+def detect_tempo_change(
+    beat_times: np.ndarray,
+    downbeat_indices: np.ndarray | None,
+    window_bars: int = 8,
+    persist_bars: int = 4,
+) -> dict | None:
+    """
+    Detect a sustained arrangement-level tempo change.
+
+    The current pipeline assumes a single global BPM and warps everything to
+    it. That's fine for AI jitter or human rubato (high-frequency wobble
+    around a stable mean) but wrong for songs with real section-level tempo
+    shifts (e.g. ballad section at 70 BPM, chorus at 90 BPM). For the latter
+    the warp would produce audibly broken output, so we'd rather stop and
+    tell the user.
+
+    Algorithm:
+      1. Compute per-bar median beat interval → per-bar BPM.
+         If downbeats are unavailable, treat groups of 4 beats as a bar
+         (acceptable fallback — the smoothing window absorbs the error).
+      2. Rolling-median over `window_bars` to flatten jitter/rubato.
+      3. Scan for sustained step changes: |Δbpm| ≥ max(6, 6%) of the base
+         BPM, that persists for at least `persist_bars` more windows
+         without returning to the prior level.
+
+    Returns
+    -------
+    None if no change is detected, else
+    {"from_bpm": float, "to_bpm": float, "at_bar": int, "at_time_s": float}.
+    """
+    if len(beat_times) < (window_bars + persist_bars) * 4:
+        # Too short to reason about — let it through.
+        return None
+
+    intervals = np.diff(beat_times)
+    if intervals.size == 0:
+        return None
+
+    # Group beats into bars.
+    if downbeat_indices is not None and len(downbeat_indices) >= 4:
+        # Use real bar boundaries.
+        bar_bpms: list[float] = []
+        bar_starts_t: list[float] = []
+        for i in range(len(downbeat_indices) - 1):
+            lo = int(downbeat_indices[i])
+            hi = int(downbeat_indices[i + 1])
+            if hi <= lo + 1:
+                continue
+            bar_intervals = intervals[lo:hi - 1] if hi - 1 <= len(intervals) else intervals[lo:]
+            if len(bar_intervals) == 0:
+                continue
+            median_interval = float(np.median(bar_intervals))
+            bar_bpms.append(60.0 / median_interval)
+            bar_starts_t.append(float(beat_times[lo]))
+    else:
+        # No downbeats → assume 4 beats per bar.
+        beats_per_bar = 4
+        n_bars = len(intervals) // beats_per_bar
+        if n_bars < window_bars + persist_bars:
+            return None
+        bar_bpms = []
+        bar_starts_t = []
+        for b in range(n_bars):
+            lo = b * beats_per_bar
+            hi = lo + beats_per_bar
+            median_interval = float(np.median(intervals[lo:hi]))
+            bar_bpms.append(60.0 / median_interval)
+            bar_starts_t.append(float(beat_times[lo]))
+
+    bpms = np.array(bar_bpms, dtype=float)
+    if len(bpms) < window_bars + persist_bars + 1:
+        return None
+
+    # Rolling median over window_bars (centred).
+    half = window_bars // 2
+    smoothed = np.empty_like(bpms)
+    for i in range(len(bpms)):
+        lo = max(0, i - half)
+        hi = min(len(bpms), i + half + 1)
+        smoothed[i] = float(np.median(bpms[lo:hi]))
+
+    # Scan for step changes.
+    # We look for: smoothed[i] differs from smoothed[i-1] by ≥ threshold,
+    # AND smoothed[i+1..i+persist_bars] also stays on the new level (within
+    # half the threshold of smoothed[i]).
+    for i in range(window_bars, len(smoothed) - persist_bars):
+        prev_bpm = float(smoothed[i - 1])
+        curr_bpm = float(smoothed[i])
+        delta = abs(curr_bpm - prev_bpm)
+        threshold = max(6.0, 0.06 * prev_bpm)
+        if delta < threshold:
+            continue
+        # Check persistence: every smoothed value in [i, i+persist_bars]
+        # must stay within threshold/2 of curr_bpm.
+        persistence_window = smoothed[i: i + persist_bars + 1]
+        if np.all(np.abs(persistence_window - curr_bpm) < threshold / 2):
+            return {
+                "from_bpm": round(prev_bpm, 2),
+                "to_bpm":   round(curr_bpm, 2),
+                "at_bar":   i + 1,  # 1-indexed bar number
+                "at_time_s": round(bar_starts_t[i], 2),
+            }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -327,11 +566,26 @@ Examples:
                    help="Trim output to start one bar before the first detected beat "
                         "(on by default; silence-padded when the beat is near the file start)")
     p.set_defaults(trim_intro=True)
-    p.add_argument("--beats-per-bar",     type=int,      default=4, dest="beats_per_bar",
-                   help="Beats per bar for the intro trim length (default: 4)")
+    p.add_argument("--beats-per-bar",     type=int,      default=None, dest="beats_per_bar",
+                   help="Beats per bar for the intro trim length "
+                        "(default: auto-detected from downbeats, falling back to 4)")
+    p.add_argument("--allow-tempo-change", action="store_true", dest="allow_tempo_change",
+                   help="Proceed even if a sustained tempo change is detected. "
+                        "Default: stop and emit EARLY_STOP so the caller can warn the user. "
+                        "Enable only if you accept that the warp will be musically wrong "
+                        "across the tempo boundary.")
     p.add_argument("--progress-json",     action="store_true", dest="progress_json",
                    help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
+
+
+def _emit_early_stop(reason: str, **details: object) -> None:
+    """Emit a structured EARLY_STOP line on stdout. Always emitted (not gated
+    by --progress-json) so the caller / web layer can parse it even when
+    PROGRESS lines are off."""
+    payload = {"reason": reason, **details}
+    sys.stdout.write(f"EARLY_STOP {json.dumps(payload)}\n")
+    sys.stdout.flush()
 
 
 def main() -> None:
@@ -355,13 +609,42 @@ def main() -> None:
 
     _emit("detect_beats", 0.15, "detecting beats")
     print("\n[2/4] Detecting beats …")
-    beat_times, detected_bpm = detect_beats(y, sr)
+    beat_times, detected_bpm, downbeat_indices, detected_meter = detect_beats(y, sr)
     _emit("detect_beats", 0.55, f"{len(beat_times)} beats")
 
     if args.detect_only:
-        print(f"\nDetected BPM : {detected_bpm:.3f}")
-        print(f"Beat count   : {len(beat_times)}")
+        print(f"\nDetected BPM   : {detected_bpm:.3f}")
+        print(f"Beat count     : {len(beat_times)}")
+        if detected_meter:
+            print(f"Detected meter : {detected_meter}/4")
+        if downbeat_indices is not None:
+            print(f"Downbeats      : {len(downbeat_indices)}")
         return
+
+    # Tempo-change guard.
+    # Catches songs with arrangement-level tempo shifts (ballad → chorus
+    # bump, etc.) that the single-BPM warp would corrupt. AI-floating-BPM
+    # jitter and human rubato are explicitly *not* flagged — that's what
+    # the warp is for. See detect_tempo_change() docstring.
+    tempo_event = detect_tempo_change(beat_times, downbeat_indices)
+    if tempo_event is not None:
+        if args.allow_tempo_change:
+            print(f"\n  ⚠  Tempo change detected at bar {tempo_event['at_bar']} "
+                  f"({tempo_event['from_bpm']} → {tempo_event['to_bpm']} BPM); "
+                  f"continuing anyway because --allow-tempo-change was set.")
+        else:
+            print(f"\n  ✗  Tempo change detected at bar {tempo_event['at_bar']} "
+                  f"({tempo_event['from_bpm']} → {tempo_event['to_bpm']} BPM, "
+                  f"≈{tempo_event['at_time_s']}s).")
+            print(f"     Beat stabilization assumes a single tempo and would warp this incorrectly.")
+            print(f"     Split the song at the section boundary, or pass --allow-tempo-change.")
+            _emit_early_stop("tempo_change", **tempo_event)
+            sys.exit(2)
+
+    # If the user didn't pass --beats-per-bar, use the detected meter (when
+    # available) as the default for the intro trim length. Fall back to 4.
+    if args.beats_per_bar is None:
+        args.beats_per_bar = detected_meter if detected_meter else 4
 
     if args.bpm is not None:
         target_bpm = args.bpm

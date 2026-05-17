@@ -28,7 +28,14 @@ export type JobStatus = {
   settings: Settings;
   startedAt: string;
   finishedAt: string | null;
-  error: { exitCode: number | null; stderrTail: string } | null;
+  error: {
+    exitCode: number | null;
+    stderrTail: string;
+    // Structured early-stop signals from the pipeline (e.g. tempo_change).
+    // When set, the UI renders a dedicated message instead of the stderr tail.
+    kind?: "tempo_change";
+    details?: Record<string, unknown>;
+  } | null;
   // pid of the spawned Python process group leader (null until spawn, or once cleared)
   pid: number | null;
   // ISO timestamp of the last Node-side activity (heartbeat or PROGRESS event).
