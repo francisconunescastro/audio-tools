@@ -13,6 +13,18 @@ type Status = {
   finishedAt: string | null;
 };
 
+type StemInfo = { present: boolean; rms_dbfs_peak: number; loud_seconds: number };
+
+type Metadata = {
+  chordChart: {
+    key?: string;
+    time_signature?: string;
+    bars?: number;
+    sections?: Array<{ label: string; start_bar: number; end_bar: number }>;
+  } | null;
+  stems: Record<string, StemInfo> | null;
+};
+
 function formatDuration(ms: number): string {
   const totalSec = Math.round(ms / 1000);
   const m = Math.floor(totalSec / 60);
@@ -23,6 +35,7 @@ function formatDuration(ms: number): string {
 
 export default function DonePage({ params }: { params: { id: string } }) {
   const [status, setStatus] = useState<Status | null>(null);
+  const [metadata, setMetadata] = useState<Metadata | null>(null);
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
@@ -33,6 +46,13 @@ export default function DonePage({ params }: { params: { id: string } }) {
         return;
       }
       if (res.ok) setStatus(await res.json());
+      // Metadata is best-effort — the page renders fine without it.
+      try {
+        const m = await fetch(`/api/jobs/${params.id}/metadata`, { cache: "no-store" });
+        if (m.ok) setMetadata(await m.json());
+      } catch {
+        // ignore
+      }
     })();
   }, [params.id]);
 
@@ -70,7 +90,20 @@ export default function DonePage({ params }: { params: { id: string } }) {
           {status.finishedAt && (
             <Row label="Finished" value={new Date(status.finishedAt).toLocaleString()} />
           )}
+          {metadata?.chordChart?.key && (
+            <Row label="Detected key" value={metadata.chordChart.key} />
+          )}
+          {metadata?.chordChart?.time_signature && (
+            <Row label="Meter" value={metadata.chordChart.time_signature} />
+          )}
+          {metadata?.chordChart?.bars !== undefined && (
+            <Row label="Bars" value={String(metadata.chordChart.bars)} />
+          )}
         </div>
+
+        {metadata?.stems && Object.keys(metadata.stems).length > 0 && (
+          <StemsSummary stems={metadata.stems} />
+        )}
 
         <a
           href={`/api/jobs/${params.id}/zip`}
@@ -99,6 +132,44 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between gap-4">
       <span className="text-neutral-500">{label}</span>
       <span className="font-mono">{value}</span>
+    </div>
+  );
+}
+
+function StemsSummary({ stems }: { stems: Record<string, StemInfo> }) {
+  // Honest reporting beats silent-stem confusion. Demucs always returns every
+  // stem its model can produce; we flag the ones that came back as ≤ -30 dBFS
+  // bleed-only so users don't think a vocals.wav with 0.3 s of room noise is
+  // their actual vocal take.
+  const order = ["vocals", "drums", "bass", "guitar", "piano", "other"];
+  const known = order.filter((n) => stems[n]);
+  const extras = Object.keys(stems).filter((n) => !order.includes(n));
+  const all = [...known, ...extras];
+  if (all.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5 text-left text-sm space-y-2">
+      <p className="text-neutral-500 mb-1">Stems detected</p>
+      <ul className="space-y-1">
+        {all.map((name) => {
+          const s = stems[name];
+          const isPresent = s.present;
+          return (
+            <li key={name} className="flex items-center justify-between gap-3">
+              <span className="font-mono">{name}</span>
+              <span className={isPresent ? "text-neutral-600 dark:text-neutral-400" : "text-amber-700 dark:text-amber-400"}>
+                {isPresent
+                  ? `${s.loud_seconds.toFixed(0)}s above −30 dBFS`
+                  : `low energy (peak ${s.rms_dbfs_peak.toFixed(1)} dBFS — likely silent or bleed)`}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="text-xs text-neutral-500 pt-1">
+        All stems are still in the ZIP. Low-energy stems are typically silent or model bleed —
+        not the actual instrument.
+      </p>
     </div>
   );
 }
