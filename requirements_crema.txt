@@ -11,3 +11,7 @@ pydub>=0.25.1
 soundfile>=0.12.1
 librosa>=0.10.0
 numpy>=1.24,<2.0
+
+# Symbolic music — MusicXML export (Phase 1) + lead sheet roadmap.
+# Pure-Python, no native deps.
+music21>=9.1.0

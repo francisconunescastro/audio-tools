@@ -690,6 +690,114 @@ def key_override_to_display(key_str: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# MusicXML generation  (editable in MuseScore / Sibelius)
+# ---------------------------------------------------------------------------
+#
+# music21's ChordSymbol expects flats spelled as "-" (e.g. "B-m7" for Bbm7) and
+# rejects some labels the rest of the codebase emits ("ø7", "mM7" via parens,
+# etc.).  _crema_to_m21_figure() translates between the two conventions.
+
+# Quality suffix mapping for music21.harmony.ChordSymbol.figure
+_QUALITY_TO_M21 = {
+    "maj":     "",       "min":     "m",
+    "7":       "7",      "maj7":    "maj7",
+    "min7":    "m7",     "dim":     "dim",
+    "dim7":    "dim7",   "hdim7":   "m7b5",
+    "aug":     "aug",    "sus2":    "sus2",
+    "sus4":    "sus4",   "maj6":    "6",
+    "min6":    "m6",     "minmaj7": "mM7",
+}
+
+
+def _crema_to_m21_figure(label: str, use_sharps: bool = False) -> str | None:
+    """
+    Convert a crema-style chord label (e.g. 'Bb:min7', 'C#:maj7') into a
+    music21 ChordSymbol figure string ('B-m7', 'C#maj7').  Returns None for
+    N/X/empty labels which become rests in the score.
+    """
+    if label in ("N", "X", ""):
+        return None
+    root, quality = label.split(":", 1) if ":" in label else (label, "maj")
+    # Normalise spelling to the key's accidental policy first.
+    root = _FLAT_TO_SHARP_ROOT.get(root, root) if use_sharps else _SHARP_TO_FLAT_ROOT.get(root, root)
+    # music21 uses "-" for flat, not "b"
+    if root.endswith("b") and len(root) > 1:
+        root = root[:-1] + "-"
+    return root + _QUALITY_TO_M21.get(quality, "")
+
+
+def bar_chords_to_musicxml(
+    bar_chords: list[dict],
+    beats_per_bar: int,
+    key_root: int,
+    key_mode: str,
+    title: str,
+    time_sig_str: str,
+    use_sharps: bool = False,
+):
+    """
+    Build a music21 Score containing the chord chart as ChordSymbol events.
+    Returns the Score; caller is responsible for `score.write('musicxml', path)`.
+
+    Each segment lands at the correct beat offset within its measure, so
+    mid-bar chord changes (when our --mid-bar-threshold gate lets them through)
+    survive the export.
+    """
+    from music21 import stream, harmony, meter, key as m21key, metadata, note
+
+    score = stream.Score()
+    score.metadata = metadata.Metadata(title=title)
+
+    part = stream.Part()
+
+    # Key signature.  music21 wants the root spelled with "-" for flats.
+    root_map = _SEMITONE_TO_ROOT_SHARP if use_sharps else _SEMITONE_TO_ROOT_FLAT
+    key_root_name = root_map[key_root]
+    if key_root_name.endswith("b") and len(key_root_name) > 1:
+        key_root_name = key_root_name[:-1] + "-"
+    # music21.key.Key uses lowercase for minor, capital for major
+    key_tonic = key_root_name if key_mode == "major" else key_root_name.lower()
+    part.append(m21key.Key(key_tonic))
+
+    # Time signature (handle "6/8" specially; everything else is N/4)
+    part.append(meter.TimeSignature(time_sig_str))
+
+    # Each grid beat in our chord grid = 1.0 quarterLength regardless of meter.
+    # In 6/8 this gives a 3.0-ql bar of three quarter-note pulses — chord
+    # placement is correct; MuseScore will display the time signature as 6/8
+    # and render the compound feel.
+    beat_ql = 1.0
+    bar_ql  = beats_per_bar * beat_ql
+
+    for bar in bar_chords:
+        measure = stream.Measure(number=bar["bar"])
+        offset = 0.0
+        for seg in bar["segments"]:
+            figure = _crema_to_m21_figure(seg["chord"], use_sharps)
+            if figure is None:
+                # No chord — insert a rest of the same duration so the measure
+                # accounts for the time correctly.
+                r = note.Rest()
+                r.duration.quarterLength = seg["beats"] * beat_ql
+                measure.insert(offset, r)
+            else:
+                cs = harmony.ChordSymbol(figure)
+                cs.duration.quarterLength = seg["beats"] * beat_ql
+                measure.insert(offset, cs)
+            offset += seg["beats"] * beat_ql
+        # Pad the measure if the segments don't fill it (defensive — they
+        # should already sum to beats_per_bar).
+        if offset < bar_ql:
+            r = note.Rest()
+            r.duration.quarterLength = bar_ql - offset
+            measure.insert(offset, r)
+        part.append(measure)
+
+    score.append(part)
+    return score
+
+
+# ---------------------------------------------------------------------------
 # LilyPond generation
 # ---------------------------------------------------------------------------
 
@@ -865,6 +973,7 @@ def main() -> None:
     pdf_path  = base + ".pdf"
     ly_path   = base + ".ly"
     json_path = base + ".json"
+    xml_path  = base + ".musicxml"
 
     # 1. Load
     _emit("load", 0.02, "loading audio")
@@ -1077,6 +1186,25 @@ def main() -> None:
 
     print(f"\n  PDF saved: {pdf_path}")
 
+    # Write MusicXML (editable in MuseScore / Sibelius).
+    # Failure here must not abort the run — the PDF is the primary artifact.
+    musicxml_written: str | None = None
+    try:
+        score = bar_chords_to_musicxml(
+            bar_chords,
+            beats_per_bar = beats_per_bar,
+            key_root      = key_root,
+            key_mode      = key_mode,
+            title         = title,
+            time_sig_str  = time_sig_str,
+            use_sharps    = use_sharps,
+        )
+        score.write("musicxml", fp=xml_path)
+        musicxml_written = xml_path
+        print(f"  MusicXML  : {xml_path}")
+    except Exception as e:
+        print(f"  [musicxml] export failed (non-fatal): {e}")
+
     # Write analysis JSON
     beat_intervals = np.diff(beat_times)
     all_confs      = [seg["confidence"] for seg in all_segs]
@@ -1113,6 +1241,7 @@ def main() -> None:
             "bars_snapped":         len(key_snapped),
             "snapped_bar_numbers":  key_snapped,
         },
+        "musicxml": musicxml_written,
     }
     with open(json_path, "w") as f:
         json.dump(analysis, f, indent=2)
