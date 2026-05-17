@@ -6,19 +6,53 @@ import { readStatus, outputDir } from "@/lib/jobs";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Returns the merged structured metadata produced by the pipeline:
+// Returns a merged payload describing everything the pipeline produced:
 //
 //   {
 //     chordChart: { … contents of *_chord_chart.json … } | null,
 //     stems:      { vocals: { present, rms_dbfs_peak, loud_seconds }, … } | null,
+//     files: {
+//       pdf:           "<input_base>/<input_base>_chord_chart.pdf"           | null,
+//       musicxml:      "<input_base>/<input_base>_chord_chart.musicxml"      | null,
+//       stabilizedWav: "<input_base>/<input_base>_stabilised.wav"            | null,
+//       chartJson:     "<input_base>/<input_base>_chord_chart.json"          | null,
+//       stems:         { vocals: "<input_base>/<input_base>_stems/vocals.wav", … }
+//     }
 //   }
 //
-// The done page uses this to label silent / bleed-only stems honestly and to
-// surface section info beyond what status.json carries.
+// File paths are relative to the job's output dir; the done page passes
+// them to /api/jobs/[id]/file?name=<path> for inline playback / download.
 //
-// Returns 404 if the job doesn't exist; returns an empty object (200) if the
-// job exists but no metadata files have been written yet (e.g. it errored
-// before stems were split).
+// pipeline.py writes everything one level deep under output/:
+//
+//   <job>/output/<input_base>/{...}.wav, {...}.pdf, etc.
+//   <job>/output/<input_base>/<input_base>_stems/{vocals,drums,...}.wav
+//
+// So we look inside whichever first-level subfolder of output/ exists.
+
+type StemInfo = { present: boolean; rms_dbfs_peak: number; loud_seconds: number };
+
+async function readJsonIfExists<T>(filePath: string): Promise<T | null> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function findFirstSubdir(dir: string): Promise<string | null> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory()) return e.name;
+    }
+  } catch {
+    /* dir missing */
+  }
+  return null;
+}
+
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
   const status = await readStatus(params.id);
   if (!status) {
@@ -26,33 +60,71 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   }
 
   const out = outputDir(params.id);
-
-  // The chord-chart JSON is named "<basename>_chord_chart.json".  We don't
-  // know the basename so glob for the suffix.
-  let chordChart: unknown = null;
-  let stems: unknown = null;
-  try {
-    const entries = await fs.readdir(out);
-    const chordFile = entries.find((e) => e.endsWith("_chord_chart.json"));
-    if (chordFile) {
-      const raw = await fs.readFile(path.join(out, chordFile), "utf8");
-      chordChart = JSON.parse(raw);
-    }
-    // Stems info lives under output/<basename>_stems/stems_info.json — that's
-    // pipeline.py's default. Look for any *_stems/stems_info.json child.
-    const stemsDir = entries.find((e) => e.endsWith("_stems"));
-    if (stemsDir) {
-      try {
-        const raw = await fs.readFile(path.join(out, stemsDir, "stems_info.json"), "utf8");
-        const parsed = JSON.parse(raw) as { stems?: Record<string, unknown> };
-        stems = parsed.stems ?? null;
-      } catch {
-        // No stems_info.json (older runs or stems skipped) — leave null.
-      }
-    }
-  } catch {
-    // outputDir doesn't exist yet
+  const inputBase = await findFirstSubdir(out);
+  if (!inputBase) {
+    return NextResponse.json({ chordChart: null, stems: null, files: emptyFiles() });
   }
 
-  return NextResponse.json({ chordChart, stems });
+  const stageDir = path.join(out, inputBase);
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(stageDir);
+  } catch {
+    return NextResponse.json({ chordChart: null, stems: null, files: emptyFiles() });
+  }
+
+  const pdf            = entries.find((e) => e.endsWith("_chord_chart.pdf"))      ?? null;
+  const musicxml       = entries.find((e) => e.endsWith("_chord_chart.musicxml")) ?? null;
+  const chartJsonName  = entries.find((e) => e.endsWith("_chord_chart.json"))     ?? null;
+  // "*_stabilised.wav" — but not the ".bpm" sidecar
+  const stabilizedWav  = entries.find((e) => e.endsWith("_stabilised.wav"))       ?? null;
+  const stemsDirName   = entries.find((e) => e.endsWith("_stems"))                ?? null;
+
+  // Parse the chord-chart JSON for the analysis card.
+  const chordChart = chartJsonName
+    ? await readJsonIfExists<Record<string, unknown>>(path.join(stageDir, chartJsonName))
+    : null;
+
+  // Parse the stems_info.json + enumerate per-stem WAVs.
+  let stems: Record<string, StemInfo> | null = null;
+  const stemFiles: Record<string, string> = {};
+  if (stemsDirName) {
+    const stemsDir = path.join(stageDir, stemsDirName);
+    try {
+      const stemEntries = await fs.readdir(stemsDir);
+      const wavs = stemEntries.filter((e) => e.endsWith(".wav"));
+      for (const w of wavs) {
+        const name = w.replace(/\.wav$/, "");
+        stemFiles[name] = path.join(inputBase, stemsDirName, w);
+      }
+    } catch {
+      /* no stems dir */
+    }
+    const info = await readJsonIfExists<{ stems?: Record<string, StemInfo> }>(
+      path.join(stemsDir, "stems_info.json"),
+    );
+    stems = info?.stems ?? null;
+  }
+
+  return NextResponse.json({
+    chordChart,
+    stems,
+    files: {
+      pdf:           pdf            ? path.join(inputBase, pdf)           : null,
+      musicxml:      musicxml       ? path.join(inputBase, musicxml)      : null,
+      stabilizedWav: stabilizedWav  ? path.join(inputBase, stabilizedWav) : null,
+      chartJson:     chartJsonName  ? path.join(inputBase, chartJsonName) : null,
+      stems:         stemFiles,
+    },
+  });
+}
+
+function emptyFiles() {
+  return {
+    pdf: null,
+    musicxml: null,
+    stabilizedWav: null,
+    chartJson: null,
+    stems: {} as Record<string, string>,
+  };
 }
