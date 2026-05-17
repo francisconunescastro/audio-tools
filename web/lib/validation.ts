@@ -39,6 +39,9 @@ export const SettingsSchema = z.object({
   keySnapThreshold: z.number().min(0).max(1).optional(),
   halfTime: z.boolean().optional(),
   compound: z.boolean().optional(),
+  // Disable MSAF structural segmentation — no A/B/C rehearsal marks on the PDF
+  // or in the MusicXML. Set this if MSAF mis-segments and the marks distract.
+  skipSections: z.boolean().optional(),
 
   // Stems
   skipStems: z.boolean().optional(),

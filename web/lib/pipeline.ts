@@ -129,6 +129,7 @@ function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[
     args.push("--key-snap-threshold", String(s.keySnapThreshold));
   if (s.halfTime)               args.push("--half-time");
   if (s.compound)               args.push("--compound");
+  if (s.skipSections)           args.push("--skip-sections");
 
   // Stems
   if (s.skipStems)              args.push("--skip-stems");

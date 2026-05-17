@@ -15,6 +15,9 @@ __pycache__/
 *.bpm
 .DS_Store
 
+# MSAF (sections detection) writes a feature cache into the cwd
+.features_msaf_tmp.json
+
 # Web UI wrapper
 web/node_modules/
 web/.next/

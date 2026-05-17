@@ -30,6 +30,7 @@ export type AdvancedState = {
   keySnapThreshold: string;
   halfTime: boolean;
   compound: boolean;
+  skipSections: boolean;
 
   // Stems
   skipStems: boolean;
@@ -67,6 +68,7 @@ export const DEFAULT_ADVANCED: AdvancedState = {
   keySnapThreshold: "0.65",
   halfTime: false,
   compound: false,
+  skipSections: false,
 
   skipStems: false,
   stemVocals: true,
@@ -156,6 +158,13 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
           <Row>
             <Check label="Force half-time (every other beat)" checked={value.halfTime} onChange={(v) => patch("halfTime", v)} />
             <Check label="Force 6/8 (compound)" checked={value.compound} onChange={(v) => patch("compound", v)} />
+          </Row>
+          <Row>
+            <Check
+              label="Skip section detection (no A/B/C rehearsal marks)"
+              checked={value.skipSections}
+              onChange={(v) => patch("skipSections", v)}
+            />
           </Row>
         </Section>
 
@@ -287,6 +296,7 @@ export function toSettingsPayload(a: AdvancedState) {
     keySnapThreshold: num(a.keySnapThreshold),
     halfTime: a.halfTime || undefined,
     compound: a.compound || undefined,
+    skipSections: a.skipSections || undefined,
 
     skipStems: a.skipStems || undefined,
     stems: a.skipStems || allStems ? undefined : stems,

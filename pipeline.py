@@ -80,6 +80,8 @@ Examples:
     chart.add_argument("--time-sig",      type=int, default=None, dest="time_sig",
                        help="Beats per bar (default: auto)")
     chart.add_argument("--bars-per-line", type=int, default=4, dest="bars_per_line")
+    chart.add_argument("--skip-sections", action="store_true", dest="skip_sections",
+                       help="Skip MSAF structural segmentation (no A/B/C rehearsal marks).")
     chart.add_argument("--no-bpm",          action="store_true", help="Omit BPM from chart subtitle")
     chart.add_argument("--no-key",          action="store_true", help="Omit key from chart subtitle")
     chart.add_argument("--no-meter",        action="store_true", help="Omit meter from chart subtitle")
@@ -291,6 +293,7 @@ def main() -> None:
     if args.key_snap_threshold != 0.65:       cmd += ["--key-snap-threshold", str(args.key_snap_threshold)]
     if args.half_time:                        cmd += ["--half-time"]
     if args.compound:                         cmd += ["--compound"]
+    if args.skip_sections:                    cmd += ["--skip-sections"]
     if args.open:                             cmd += ["--open"]
     if _PROGRESS_JSON:                        cmd += ["--progress-json"]
     run_with_progress(
