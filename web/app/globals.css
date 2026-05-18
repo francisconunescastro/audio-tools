@@ -32,8 +32,18 @@ input[type="number"] {
   outline-offset: 2px;
 }
 
-/* Native audio player — minimal tint */
+/* Native audio player — pill shape; thin warm-grey stroke; ivory fill */
 audio {
   width: 100%;
   height: 36px;
+  background-color: transparent;
+  border: 1px solid #D1CFC5;
+  border-radius: 9999px;
+}
+audio::-webkit-media-controls-panel {
+  background-color: #F4F3F1;
+}
+audio::-webkit-media-controls-enclosure {
+  background-color: #F4F3F1;
+  border-radius: 9999px;
 }

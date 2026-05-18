@@ -135,11 +135,6 @@ export default function UploadPage() {
 
         {/* Header */}
         <header className="space-y-3">
-          <div>
-            <span className="inline-flex items-center bg-brand-yellow text-ebony font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
-              Musiversal
-            </span>
-          </div>
           <h1 className="font-display text-[36px] font-bold text-ebony leading-none">
             Session Materials Creator
           </h1>
@@ -192,7 +187,7 @@ export default function UploadPage() {
               "w-full font-season text-base font-semibold px-6 py-3.5 rounded-full transition-colors",
               !ready || busy
                 ? "bg-[#E7E5E0] text-[#999682] cursor-not-allowed"
-                : "bg-brand-yellow text-ebony hover:bg-[#F3A00D]",
+                : "bg-ebony text-ivory hover:bg-[#222222]",
             ].join(" ")}
           >
             {busy
@@ -253,7 +248,7 @@ function SessionTypeCard({
             className={[
               "font-season text-sm font-medium px-4 py-1.5 rounded-full border transition-colors",
               value === v
-                ? "bg-brand-yellow text-ebony border-brand-yellow"
+                ? "bg-ebony text-ivory border-ebony"
                 : "bg-white text-[#454545] border-[#D1CFC5] hover:border-[#999682]",
               disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer",
             ].join(" ")}
@@ -279,7 +274,7 @@ function AnalyzingCard({ filename }: { filename: string }) {
   return (
     <div className="bg-ivory border border-warm-100 border-l-4 border-l-brand-yellow px-4 py-4 flex items-center gap-3">
       <Spinner />
-      <div>
+      <div className="min-w-0 flex-1">
         <p className="font-season text-sm font-semibold text-ebony">Analyzing file…</p>
         <p className="font-inter text-xs text-[#888888] truncate mt-0.5">
           BPM, key, and meter detection on {filename}

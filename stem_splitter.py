@@ -238,7 +238,7 @@ def mix_backing_track(
 ) -> str | None:
     """
     Mix all WAV stems in stems_dir (except exclude_stem) into a single WAV.
-    Uses torchaudio first (always present in venv_demucs), falls back to soundfile.
+    Reads + writes via torchaudio (always present in venv_demucs).
     Returns output_path on success, None if no mixable stems found.
     """
     import numpy as np
@@ -301,8 +301,20 @@ def mix_backing_track(
     if peak > 0.891:
         mixed = mixed * (0.891 / peak)
 
-    import soundfile as sf  # type: ignore
-    sf.write(output_path, mixed.astype(np.float32), sr, subtype="PCM_24")
+    # Save via torchaudio (always available in venv_demucs).
+    # Demucs itself writes its stems this way; the TorchCodec deprecation
+    # warnings are noisy but harmless.
+    import torch       # type: ignore
+    import torchaudio  # type: ignore
+    out_tensor = torch.from_numpy(mixed.T.astype(np.float32))  # (channels, samples)
+    try:
+        torchaudio.save(
+            output_path, out_tensor, sample_rate=sr,
+            bits_per_sample=24, encoding="PCM_S",
+        )
+    except Exception:
+        # Fallback: let torchaudio pick defaults (16-bit) if the codec rejects 24-bit
+        torchaudio.save(output_path, out_tensor, sample_rate=sr)
     print(f"  ✓  Backing track  →  {output_path}")
     print(f"         Mixed      : {', '.join(included)}")
     print(f"         Excluded   : {exclude_stem}")

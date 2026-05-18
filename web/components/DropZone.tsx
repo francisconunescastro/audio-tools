@@ -2,7 +2,7 @@
 
 import { useDropzone } from "react-dropzone";
 import { useCallback } from "react";
-import { Music, X } from "lucide-react";
+import { Music } from "lucide-react";
 
 const ACCEPT = {
   "audio/wav":  [".wav"],
@@ -44,15 +44,11 @@ export function DropZone({ file, onFile, disabled }: Props) {
       <div
         {...getRootProps()}
         className={[
-          "relative border-2 border-dashed transition-colors",
+          "relative transition-colors",
           "flex flex-col items-center justify-center text-center",
           "py-14 px-8 cursor-pointer select-none",
           disabled ? "opacity-40 cursor-not-allowed pointer-events-none" : "",
-          isDragActive
-            ? "border-brand-yellow bg-[#FFFBEB]"
-            : file
-              ? "border-[#D1CFC5] bg-ivory"
-              : "border-[#D1CFC5] bg-ivory hover:border-[#999682]",
+          isDragActive ? "bg-[#FFFBEB]" : "bg-ivory",
         ].join(" ")}
       >
         <input {...getInputProps()} />
@@ -81,24 +77,15 @@ export function DropZone({ file, onFile, disabled }: Props) {
           </p>
         )}
 
-        {/* Selected file pill */}
+        {/* Selected file row */}
         {file && (
-          <div className="mt-4 flex items-center gap-2">
-            <span className="inline-flex items-center gap-2 bg-ebony text-ivory font-inter text-xs px-3 py-1 rounded-full">
-              <Music size={12} strokeWidth={2} />
-              {file.name}
-              <span className="text-[#999682]">
+          <div className="mt-4 w-full max-w-sm">
+            <span className="flex items-center gap-2 border border-[#D1CFC5] bg-white px-3 py-1.5 rounded-full w-full min-w-0">
+              <span className="font-inter text-xs text-ebony truncate min-w-0 flex-1">{file.name}</span>
+              <span className="font-inter text-xs text-[#888888] flex-shrink-0 whitespace-nowrap">
                 {(file.size / 1024 / 1024).toFixed(1)} MB
               </span>
             </span>
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onFile(null); }}
-              className="p-1 rounded-full hover:bg-[#E7E5E0] transition-colors"
-              aria-label="Remove file"
-            >
-              <X size={14} strokeWidth={2} className="text-[#888888]" />
-            </button>
           </div>
         )}
       </div>

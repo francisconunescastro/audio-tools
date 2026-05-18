@@ -159,7 +159,7 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
           <span className="inline-flex items-center bg-brand-yellow text-ebony font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
             Processing
           </span>
-          <h1 className="font-display text-[36px] font-bold text-ebony leading-tight pt-2">
+          <h1 className="font-display text-[36px] font-bold text-ebony leading-tight pt-2 line-clamp-3 break-all">
             {status.filename}
           </h1>
         </header>
@@ -174,7 +174,7 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
           {/* Progress bar — 4px, no rounding */}
           <div className="h-1 w-full bg-[#E7E5E0] overflow-hidden">
             <div
-              className="h-full bg-brand-yellow transition-[width] duration-500 ease-out"
+              className="h-full bg-ebony transition-[width] duration-500 ease-out"
               style={{ width: `${pct}%` }}
             />
           </div>

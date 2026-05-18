@@ -142,13 +142,12 @@ export default function DonePage({ params }: { params: { id: string } }) {
             Complete
           </span>
           <h1 className="font-display text-[48px] font-bold text-ebony leading-none pt-2">
-            Done.
+            Your files are ready!
           </h1>
           <p className="font-inter text-sm text-[#6D6D6D]">
-            {status.filename}
-            {status.finishedAt && (
-              <> · {new Date(status.finishedAt).toLocaleString()}</>
-            )}
+            {status.finishedAt
+              ? new Date(status.finishedAt).toLocaleString()
+              : null}
           </p>
           <p className="font-inter text-xs text-[#B0B0B0]">
             Processed in {formatDuration(status.elapsedMs)}
@@ -188,15 +187,15 @@ export default function DonePage({ params }: { params: { id: string } }) {
         )}
 
         {/* Download all */}
-        <div className="bg-ebony px-6 py-5 space-y-3">
+        <div className="space-y-2 pt-2">
           <a
             href={`/api/jobs/${jobId}/zip`}
-            className="flex items-center justify-center gap-2 w-full bg-brand-yellow text-ebony font-season font-semibold text-base py-3 rounded-full hover:bg-[#F3A00D] transition-colors"
+            className="flex items-center justify-center gap-2 w-full bg-ebony text-white font-season font-semibold text-base py-3.5 rounded-full hover:bg-[#222222] transition-colors"
           >
             <Download size={16} strokeWidth={2.5} />
             Download everything (ZIP)
           </a>
-          <p className="font-inter text-xs text-[#999682] text-center">
+          <p className="font-inter text-xs text-[#888888] text-center">
             Stabilised WAV · chord chart PDF + MusicXML · stems · analysis JSON
           </p>
         </div>
@@ -289,14 +288,6 @@ function ChordChartCard({ chart, files, jobId }: { chart: ChordChart | null; fil
         </div>
       </div>
 
-      {files.pdf && (
-        <iframe
-          src={`/api/jobs/${jobId}/file?name=${encodeURIComponent(files.pdf)}#view=FitH`}
-          className="w-full h-96 border border-warm-200 bg-white"
-          title="Chord chart preview"
-        />
-      )}
-
       {ci && (
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-inter text-xs text-[#6D6D6D] pt-1">
           <Row2 label="Mean confidence"    value={pct(ci.mean_confidence)} />
@@ -387,7 +378,7 @@ function StemsCard({ stems, stemFiles, jobId }: { stems: Record<string, StemInfo
           {presentCount} present{lowCount > 0 && ` · ${lowCount} low-energy`}
         </span>
       </div>
-      <ul className="space-y-4">
+      <ul className="space-y-6">
         {all.map((name) => (
           <StemRow
             key={name}
@@ -412,17 +403,19 @@ function StemRow({ name, info, relPath, jobId }: { name: string; info: StemInfo;
   return (
     <li className="space-y-1.5">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          {/* Presence indicator */}
+        <div className="flex items-baseline gap-2 min-w-0">
           <span className={[
-            "inline-flex items-center justify-center w-5 h-5",
-            info.present ? "text-brand-teal" : "text-[#D1CFC5]",
+            "inline-flex items-center justify-center w-4 h-4 flex-shrink-0 self-center",
+            info.present ? "text-ebony" : "text-[#B0B0B0]",
           ].join(" ")}>
             {icon}
           </span>
-          <span className="font-season text-sm font-semibold text-ebony capitalize">{name}</span>
           <span className={[
-            "font-inter text-xs",
+            "font-season text-sm font-semibold capitalize",
+            info.present ? "text-ebony" : "text-[#B0B0B0]",
+          ].join(" ")}>{name}</span>
+          <span className={[
+            "font-inter text-xs truncate",
             info.present ? "text-[#888888]" : "text-[#B0B0B0]",
           ].join(" ")}>
             {info.present
@@ -431,7 +424,9 @@ function StemRow({ name, info, relPath, jobId }: { name: string; info: StemInfo;
           </span>
         </div>
         {relPath && (
-          <DownloadButton jobId={jobId} relPath={relPath} label="WAV" icon={<Download size={11} strokeWidth={2} />} small />
+          <span className={info.present ? "" : "opacity-50"}>
+            <DownloadButton jobId={jobId} relPath={relPath} label="WAV" icon={<Download size={11} strokeWidth={2} />} small />
+          </span>
         )}
       </div>
       {src && info.present && (
