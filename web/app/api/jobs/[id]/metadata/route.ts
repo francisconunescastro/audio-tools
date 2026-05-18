@@ -74,10 +74,12 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   }
 
   const pdf            = entries.find((e) => e.endsWith("_chord_chart.pdf"))      ?? null;
+  const pdfPreview     = entries.find((e) => e.endsWith("_chord_chart_preview.png")) ?? null;
   const musicxml       = entries.find((e) => e.endsWith("_chord_chart.musicxml")) ?? null;
   const chartJsonName  = entries.find((e) => e.endsWith("_chord_chart.json"))     ?? null;
   // "*_stabilised.wav" — but not the ".bpm" sidecar
   const stabilizedWav  = entries.find((e) => e.endsWith("_stabilised.wav"))       ?? null;
+  const backingTrackWav = entries.find((e) => e.endsWith("_backing_track.wav"))   ?? null;
   const stemsDirName   = entries.find((e) => e.endsWith("_stems"))                ?? null;
 
   // Parse the chord-chart JSON for the analysis card.
@@ -111,9 +113,11 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     stems,
     files: {
       pdf:           pdf            ? path.join(inputBase, pdf)           : null,
+      pdfPreview:    pdfPreview     ? path.join(inputBase, pdfPreview)    : null,
       musicxml:      musicxml       ? path.join(inputBase, musicxml)      : null,
       stabilizedWav: stabilizedWav  ? path.join(inputBase, stabilizedWav) : null,
       chartJson:     chartJsonName  ? path.join(inputBase, chartJsonName) : null,
+      backingTrack:  backingTrackWav ? path.join(inputBase, backingTrackWav) : null,
       stems:         stemFiles,
     },
   });
@@ -122,9 +126,11 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
 function emptyFiles() {
   return {
     pdf: null,
+    pdfPreview: null,
     musicxml: null,
     stabilizedWav: null,
     chartJson: null,
+    backingTrack: null,
     stems: {} as Record<string, string>,
   };
 }

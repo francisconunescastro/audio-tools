@@ -231,6 +231,97 @@ def split(input_path: str, output_dir: str, model: str, wanted_stems: set[str] |
     return written
 
 
+def mix_backing_track(
+    stems_dir: str,
+    exclude_stem: str,
+    output_path: str,
+) -> str | None:
+    """
+    Mix all WAV stems in stems_dir (except exclude_stem) into a single WAV.
+    Reads + writes via torchaudio (always present in venv_demucs).
+    Returns output_path on success, None if no mixable stems found.
+    """
+    import numpy as np
+
+    mixed: np.ndarray | None = None
+    sr: int = 0
+    included: list[str] = []
+    exclude = exclude_stem.strip().lower()
+
+    for fname in sorted(os.listdir(stems_dir)):
+        if not fname.endswith(".wav"):
+            continue
+        stem_name = os.path.splitext(fname)[0].lower()
+        if stem_name == exclude:
+            continue
+
+        wav_path = os.path.join(stems_dir, fname)
+        data: np.ndarray | None = None
+        stem_sr: int = 0
+
+        try:
+            import torchaudio  # type: ignore
+            wav_t, sr_t = torchaudio.load(wav_path)
+            data = wav_t.numpy().T.astype(np.float64)   # (samples, channels)
+            stem_sr = int(sr_t)
+        except Exception:
+            pass
+
+        if data is None:
+            try:
+                import soundfile as sf  # type: ignore
+                data, stem_sr = sf.read(wav_path, always_2d=True)
+                data = data.astype(np.float64)
+            except Exception as e:
+                print(f"  ⚠  backing track: skipping {fname}: {e}", file=sys.stderr)
+                continue
+
+        if mixed is None:
+            mixed = data.copy()
+            sr = stem_sr
+        else:
+            # Align shapes: both should be (samples, 2) from Demucs stereo output
+            min_ch = min(mixed.shape[1], data.shape[1])
+            mixed = mixed[:, :min_ch]
+            data  = data[:, :min_ch]
+            # Align length
+            if data.shape[0] > mixed.shape[0]:
+                mixed = np.pad(mixed, ((0, data.shape[0] - mixed.shape[0]), (0, 0)))
+            elif mixed.shape[0] > data.shape[0]:
+                data = np.pad(data, ((0, mixed.shape[0] - data.shape[0]), (0, 0)))
+            mixed = mixed + data
+
+        included.append(stem_name)
+
+    if mixed is None or not included:
+        return None
+
+    # Peak-normalise to −1 dBFS to prevent clipping
+    peak = float(np.abs(mixed).max())
+    if peak > 0.891:
+        mixed = mixed * (0.891 / peak)
+
+    # Save via torchaudio (always available in venv_demucs).
+    # Demucs itself writes its stems this way; the TorchCodec deprecation
+    # warnings are noisy but harmless.
+    import torch       # type: ignore
+    import torchaudio  # type: ignore
+    out_tensor = torch.from_numpy(mixed.T.astype(np.float32))  # (channels, samples)
+    try:
+        torchaudio.save(
+            output_path, out_tensor, sample_rate=sr,
+            bits_per_sample=24, encoding="PCM_S",
+        )
+    except Exception:
+        # Fallback: let torchaudio pick defaults (16-bit) if the codec rejects 24-bit
+        torchaudio.save(output_path, out_tensor, sample_rate=sr)
+    print(f"  ✓  Backing track  →  {output_path}")
+    print(f"         Mixed      : {', '.join(included)}")
+    print(f"         Excluded   : {exclude_stem}")
+    _emit("backing_track", 1.0, "backing track done")
+    return output_path
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Split an audio file into stems using Demucs.",
@@ -253,6 +344,10 @@ Examples:
                    help="Comma-separated stems to keep e.g. 'vocals,drums' (default: all)")
     p.add_argument("--progress-json", action="store_true", dest="progress_json",
                    help="Emit machine-readable PROGRESS JSON lines on stdout")
+    p.add_argument("--session-type", default=None, dest="session_type",
+                   help="Session instrument to exclude from the backing track (e.g. 'bass')")
+    p.add_argument("--backing-track-out", default=None, dest="backing_track_out",
+                   help="Output path for the backing track WAV")
     return p.parse_args()
 
 
@@ -281,6 +376,10 @@ def main() -> None:
 
     files = split(args.input, output_dir, args.model, wanted)
     _emit("demucs", 1.0, "done")
+
+    if args.session_type and args.backing_track_out:
+        _emit("backing_track", 0.99, "mixing backing track")
+        mix_backing_track(output_dir, args.session_type, args.backing_track_out)
 
     print(f"\nDone — {len(files)} stem(s) written to {output_dir}/")
 

@@ -63,6 +63,7 @@ export const SettingsSchema = z.object({
   skipStems: z.boolean().optional(),
   stems: z.array(z.enum(stemOptions)).optional(),
   stemModel: z.enum(["htdemucs_6s", "htdemucs", "htdemucs_ft", "mdx_extra"]).optional(),
+  sessionType: z.enum(["vocals", "guitar", "bass", "piano", "other"]).optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

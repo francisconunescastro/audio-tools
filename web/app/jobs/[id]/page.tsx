@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { AlertTriangle, XCircle } from "lucide-react";
 
 type TempoChangeDetails = {
   from_bpm?: number;
@@ -27,17 +28,17 @@ type Status = {
 };
 
 const STAGE_LABELS: Record<string, string> = {
-  queued:    "Waiting in queue…",
-  start:     "Starting…",
-  stabilize: "Stabilizing beats…",
-  chord:     "Generating chord chart…",
-  stems:     "Splitting stems…",
-  finalize:  "Packaging download…",
+  queued:    "Waiting in queue",
+  start:     "Starting up",
+  stabilize: "Stabilizing beats",
+  chord:     "Generating chord chart",
+  stems:     "Splitting stems",
+  finalize:  "Packaging download",
   done:      "Done",
 };
 
-const STALE_WARN_MS = 15_000;   // show "no updates for X" warning
-const STALE_BAD_MS  = 60_000;   // promote cancel button to primary
+const STALE_WARN_MS = 15_000;
+const STALE_BAD_MS  = 60_000;
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -62,16 +63,12 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
   const [cancelling, setCancelling] = useState(false);
   const finishedRef = useRef(false);
 
-  // Poll status every 1s while not finished.
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
         const res = await fetch(`/api/jobs/${params.id}`, { cache: "no-store" });
-        if (res.status === 404) {
-          if (!cancelled) setNotFound(true);
-          return;
-        }
+        if (res.status === 404) { if (!cancelled) setNotFound(true); return; }
         if (!res.ok) return;
         const data = (await res.json()) as Status;
         if (cancelled) return;
@@ -80,29 +77,24 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
           finishedRef.current = true;
           router.replace(`/jobs/${params.id}/done`);
         }
-      } catch {
-        // network blip — keep polling
-      }
+      } catch { /* network blip */ }
     }
     void poll();
     const id = setInterval(poll, 1000);
     return () => { cancelled = true; clearInterval(id); };
   }, [params.id, router]);
 
-  // Tick every second so derived display values (elapsed, "Xs ago") refresh
-  // between polls instead of jumping in 1-second steps.
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Warn before unload while processing.
   useEffect(() => {
     function onBeforeUnload(e: BeforeUnloadEvent) {
       if (finishedRef.current) return;
       if (status?.state === "running" || status?.state === "queued") {
         e.preventDefault();
-        e.returnValue = "Processing is still running. If you leave, the page won't be able to track it.";
+        e.returnValue = "Processing is still running.";
       }
     }
     window.addEventListener("beforeunload", onBeforeUnload);
@@ -111,36 +103,38 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
 
   async function handleCancel() {
     if (cancelling) return;
-    const ok = window.confirm("Cancel this job? The current processing will be killed and cannot be resumed.");
+    const ok = window.confirm("Cancel this job? Processing will be killed and cannot be resumed.");
     if (!ok) return;
     setCancelling(true);
     try {
       await fetch(`/api/jobs/${params.id}/cancel`, { method: "POST" });
-      // Status will flip to "error" on the next poll; let the error view render.
-    } catch {
-      // ignore — next poll will reflect server state
-    } finally {
+    } catch { /* ignore */ } finally {
       setCancelling(false);
     }
   }
 
   if (notFound) {
     return (
-      <main className="min-h-screen flex items-center justify-center px-4">
-        <div className="text-center">
-          <h1 className="text-xl font-semibold mb-2">Job not found</h1>
-          <p className="text-sm text-neutral-500 mb-4">It may have been cleaned up after 24 hours.</p>
-          <a href="/" className="text-blue-600 hover:underline">Back to upload</a>
+      <Shell>
+        <div className="text-center space-y-3">
+          <h1 className="font-display text-[36px] font-bold text-ebony leading-none">Not found</h1>
+          <p className="font-inter text-sm text-[#6D6D6D]">This job may have been cleaned up after 24 hours.</p>
+          <a href="/" className="inline-flex items-center font-season text-sm font-semibold text-ebony underline underline-offset-2">
+            Back to upload
+          </a>
         </div>
-      </main>
+      </Shell>
     );
   }
 
   if (!status) {
     return (
-      <main className="min-h-screen flex items-center justify-center px-4">
-        <p className="text-sm text-neutral-500">Loading job…</p>
-      </main>
+      <Shell>
+        <div className="flex items-center gap-2 text-[#888888]">
+          <Spinner />
+          <span className="font-inter text-sm">Loading job…</span>
+        </div>
+      </Shell>
     );
   }
 
@@ -148,128 +142,152 @@ export default function ProcessingPage({ params }: { params: { id: string } }) {
     return <ErrorView status={status} />;
   }
 
-  // Derive a live "ms since last server update" — the server sends a snapshot
-  // each poll, but tick keeps it visually advancing between polls.
   void tick;
-  const liveLastUpdateMs = status.lastUpdateMs + (Date.now() % 1000); // smooth flicker
-  // The "finalize" stage zips the output and can take 5–30 s on large files
-  // without producing fine-grained progress events. Suppress the stale-update
-  // warnings during it — we're knowingly in a sparse-update phase, not stuck.
-  const inFinalize    = status.stage === "finalize";
-  const isStale       = status.state === "running" && !inFinalize && status.lastUpdateMs > STALE_WARN_MS;
-  const isVeryStale   = status.state === "running" && !inFinalize && status.lastUpdateMs > STALE_BAD_MS;
-
+  const liveLastUpdateMs = status.lastUpdateMs + (Date.now() % 1000);
+  const inFinalize  = status.stage === "finalize";
+  const isStale     = status.state === "running" && !inFinalize && status.lastUpdateMs > STALE_WARN_MS;
+  const isVeryStale = status.state === "running" && !inFinalize && status.lastUpdateMs > STALE_BAD_MS;
   const label = STAGE_LABELS[status.stage] ?? status.stage;
-  const pct = Math.max(0, Math.min(100, status.pct));
+  const pct   = Math.max(0, Math.min(100, status.pct));
 
   return (
-    <main className="min-h-screen flex justify-center px-4 py-10">
-      <div className="w-full max-w-2xl space-y-6">
+    <Shell>
+      <div className="space-y-6">
+
+        {/* Header */}
         <header className="space-y-1">
-          <h1 className="text-2xl font-semibold">Processing…</h1>
-          <p className="text-sm text-neutral-500 font-mono break-all">{status.filename}</p>
+          <span className="inline-flex items-center bg-brand-yellow text-ebony font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
+            Processing
+          </span>
+          <h1 className="font-display text-[36px] font-bold text-ebony leading-tight pt-2 line-clamp-3 break-all">
+            {status.filename}
+          </h1>
         </header>
 
+        {/* Progress block */}
         <div className="space-y-3">
-          <div className="flex items-baseline justify-between">
-            <span className="text-base">{label}</span>
-            <span className="font-mono tabular-nums text-sm">{pct.toFixed(0)}%</span>
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="font-season text-base font-semibold text-ebony">{label}…</span>
+            <span className="font-inter text-xs text-[#888888] tabular-nums">{pct.toFixed(0)}%</span>
           </div>
-          <div className="h-3 w-full rounded-full bg-neutral-200 dark:bg-neutral-800 overflow-hidden">
+
+          {/* Progress bar — 4px, no rounding */}
+          <div className="h-1 w-full bg-[#E7E5E0] overflow-hidden">
             <div
-              className="h-full bg-blue-600 transition-[width] duration-500 ease-out"
+              className="h-full bg-ebony transition-[width] duration-500 ease-out"
               style={{ width: `${pct}%` }}
             />
           </div>
-          <div className="flex justify-between text-xs text-neutral-500">
+
+          <div className="flex justify-between font-inter text-xs text-[#B0B0B0] tabular-nums">
             <span>Elapsed: {formatElapsed(status.elapsedMs)}</span>
-            <span className="font-mono tabular-nums">
-              Last update: {formatAgo(liveLastUpdateMs)}
-            </span>
+            <span>Last update: {formatAgo(liveLastUpdateMs)}</span>
           </div>
         </div>
 
+        {/* Stale warnings */}
         {isVeryStale && (
-          <div className="rounded-lg border border-red-300 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200 px-4 py-3 text-sm space-y-2">
-            <div><strong>No updates for over a minute.</strong> The job may be stuck. Cancelling and retrying is usually the safest option.</div>
+          <div className="bg-brand-pink-50 border border-[#E7E5E0] border-l-4 border-l-brand-pink px-4 py-3 flex gap-3">
+            <XCircle size={16} className="text-brand-pink flex-shrink-0 mt-0.5" />
+            <div className="font-inter text-sm text-[#78293A] space-y-1">
+              <p className="font-semibold">No updates for over a minute.</p>
+              <p>The job may be stuck. Cancelling and retrying is usually safest.</p>
+            </div>
           </div>
         )}
         {isStale && !isVeryStale && (
-          <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 px-4 py-3 text-sm">
-            <strong>Quiet for {Math.round(status.lastUpdateMs / 1000)}s.</strong> Beat detection and stem splitting can take a while on long files — give it another moment, or cancel below.
+          <div className="bg-brand-yellow-50 border border-[#E7E5E0] border-l-4 border-l-[#F3A00D] px-4 py-3 flex gap-3">
+            <AlertTriangle size={16} className="text-[#D77908] flex-shrink-0 mt-0.5" />
+            <p className="font-inter text-sm text-[#774310]">
+              Quiet for {Math.round(status.lastUpdateMs / 1000)}s. Beat detection and stem splitting can take a while on long files.
+            </p>
           </div>
         )}
 
-        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 px-4 py-3 text-sm">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-neutral-600 dark:text-neutral-400">
-              State: <span className="font-mono">{status.state}</span>
-            </span>
-            <button
-              onClick={handleCancel}
-              disabled={cancelling}
-              className={
-                isVeryStale
-                  ? "rounded-md bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-3 py-1.5 text-sm font-medium"
-                  : "rounded-md border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50 px-3 py-1.5 text-sm"
-              }
-            >
-              {cancelling ? "Cancelling…" : "Cancel job"}
-            </button>
-          </div>
+        {/* Status + cancel row */}
+        <div className="bg-ivory border border-warm-100 px-4 py-3 flex items-center justify-between gap-3">
+          <span className="font-inter text-xs text-[#888888]">
+            State: <span className="font-mono text-ebony">{status.state}</span>
+          </span>
+          <button
+            onClick={handleCancel}
+            disabled={cancelling}
+            className={[
+              "font-season text-sm font-medium px-4 py-1.5 rounded-full transition-colors disabled:opacity-40",
+              isVeryStale
+                ? "bg-brand-pink text-white hover:bg-[#B94659]"
+                : "border border-[#D1CFC5] text-[#454545] hover:bg-[#E7E5E0]",
+            ].join(" ")}
+          >
+            {cancelling ? "Cancelling…" : "Cancel job"}
+          </button>
         </div>
 
-        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 px-4 py-3 text-sm">
-          <strong>Don't close this tab.</strong> Processing runs server-side, but if you leave this page you'll lose the progress view and the download link.
+        {/* Don't-close notice */}
+        <div className="bg-brand-yellow-50 border border-[#E7E5E0] border-l-4 border-l-brand-yellow px-4 py-3">
+          <p className="font-inter text-sm text-[#774310]">
+            <strong className="font-semibold">Keep this tab open.</strong> Processing runs server-side, but
+            leaving this page will lose the download link.
+          </p>
         </div>
+
       </div>
-    </main>
+    </Shell>
   );
 }
 
+// ---------- error views ----------
+
 function ErrorView({ status }: { status: Status }) {
-  // Structured early-stop signals (currently: tempo_change) render a dedicated
-  // explanation instead of dumping the stderr tail. Stops the user staring at
-  // a Python traceback and wondering what's wrong with their song.
   if (status.error?.kind === "tempo_change") {
     return <TempoChangeErrorView status={status} />;
   }
   return (
-    <main className="min-h-screen flex justify-center px-4 py-10">
-      <div className="w-full max-w-2xl space-y-4">
-        <h1 className="text-2xl font-semibold">Something went wrong</h1>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          The pipeline failed processing <span className="font-mono">{status.filename}</span>
-          {status.error?.exitCode !== null && status.error?.exitCode !== undefined && (
-            <span> (exit {status.error.exitCode})</span>
-          )}.
-        </p>
-        <pre className="max-h-96 overflow-auto rounded-lg bg-neutral-900 text-neutral-100 text-xs p-4 font-mono whitespace-pre-wrap">
+    <Shell>
+      <div className="space-y-5">
+        <header>
+          <span className="inline-flex items-center bg-brand-pink text-white font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
+            Error
+          </span>
+          <h1 className="font-display text-[36px] font-bold text-ebony leading-tight pt-2">
+            Something went wrong
+          </h1>
+          <p className="font-inter text-sm text-[#6D6D6D] mt-1">
+            Pipeline failed on <span className="font-mono text-ebony">{status.filename}</span>
+            {status.error?.exitCode != null && <> (exit {status.error.exitCode})</>}.
+          </p>
+        </header>
+        <pre className="bg-[#1C1B17] text-[#F4F3F1] font-mono text-xs p-4 overflow-auto max-h-80 whitespace-pre-wrap">
           {status.error?.stderrTail || "(no stderr captured)"}
         </pre>
-        <a
-          href="/"
-          className="inline-block rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm"
-        >
+        <a href="/" className="inline-flex font-season text-sm font-semibold bg-brand-yellow text-ebony px-5 py-2.5 rounded-full hover:bg-[#F3A00D] transition-colors">
           Try again
         </a>
       </div>
-    </main>
+    </Shell>
   );
 }
 
 function TempoChangeErrorView({ status }: { status: Status }) {
-  const d = (status.error?.details ?? {}) as TempoChangeDetails;
+  const d    = (status.error?.details ?? {}) as TempoChangeDetails;
   const from = d.from_bpm !== undefined ? Math.round(d.from_bpm) : null;
   const to   = d.to_bpm   !== undefined ? Math.round(d.to_bpm)   : null;
   const bar  = d.at_bar;
   const t    = d.at_time_s;
 
   return (
-    <main className="min-h-screen flex justify-center px-4 py-10">
-      <div className="w-full max-w-2xl space-y-5">
-        <h1 className="text-2xl font-semibold">This song has a tempo change</h1>
-        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 px-4 py-3 text-sm space-y-2">
+    <Shell>
+      <div className="space-y-5">
+        <header>
+          <span className="inline-flex items-center bg-brand-yellow text-ebony font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
+            Tempo change detected
+          </span>
+          <h1 className="font-display text-[36px] font-bold text-ebony leading-tight pt-2">
+            This song has a tempo change
+          </h1>
+        </header>
+
+        <div className="bg-brand-yellow-50 border border-[#E7E5E0] border-l-4 border-l-[#F3A00D] px-4 py-3 font-inter text-sm text-[#774310] space-y-2">
           {from !== null && to !== null && bar !== undefined ? (
             <p>
               Detected ~<strong>{from} BPM</strong> through bar <strong>{bar}</strong>,
@@ -280,44 +298,56 @@ function TempoChangeErrorView({ status }: { status: Status }) {
             <p>A sustained tempo change was detected mid-song.</p>
           )}
           <p>
-            Beat stabilization assumes a single tempo and would warp this incorrectly.
-            The audio would come out audibly broken across the boundary.
+            Beat stabilization assumes a single tempo and would warp the audio incorrectly across the boundary.
           </p>
         </div>
 
-        <div className="space-y-3 text-sm">
-          <p className="text-neutral-700 dark:text-neutral-300 font-medium">What to do:</p>
-          <ul className="list-disc pl-5 space-y-1 text-neutral-700 dark:text-neutral-300">
+        <div className="space-y-2 font-season text-sm text-[#454545]">
+          <p className="font-semibold text-ebony">What to do:</p>
+          <ul className="space-y-1 pl-4 list-disc">
             <li>
-              <strong>Split the song</strong> at the section boundary
-              {t !== undefined ? <> (around {t.toFixed(1)}s)</> : null} and run each
-              half separately.
+              <strong>Split the file</strong> at the boundary
+              {t !== undefined ? <> (around {t.toFixed(1)}s)</> : null} and process each half separately.
             </li>
             <li>
-              <strong>Or proceed anyway</strong>: re-upload with{" "}
-              <em>Allow tempo change</em> enabled in advanced settings — the warp will
-              be wrong across the boundary, but the chord chart and stems will still
-              process.
+              <strong>Proceed anyway</strong> — re-upload with <em>Allow tempo change</em> enabled in
+              Advanced settings. The warp will be imperfect, but chords and stems will still process.
             </li>
           </ul>
         </div>
 
-        <div className="flex gap-3 pt-2">
-          <a
-            href="/"
-            className="inline-block rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 text-sm"
-          >
-            Back to upload
-          </a>
-        </div>
+        <a href="/" className="inline-flex font-season text-sm font-semibold bg-brand-yellow text-ebony px-5 py-2.5 rounded-full hover:bg-[#F3A00D] transition-colors">
+          Back to upload
+        </a>
 
-        <details className="text-xs text-neutral-500">
+        <details className="font-inter text-xs text-[#888888]">
           <summary className="cursor-pointer">Show pipeline output</summary>
-          <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-neutral-900 text-neutral-100 p-3 font-mono whitespace-pre-wrap">
+          <pre className="mt-2 bg-[#1C1B17] text-[#F4F3F1] p-3 overflow-auto max-h-64 font-mono whitespace-pre-wrap">
             {status.error?.stderrTail || "(no stderr captured)"}
           </pre>
         </details>
       </div>
+    </Shell>
+  );
+}
+
+// ---------- shared layout ----------
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="min-h-screen bg-white flex justify-center px-4 py-12">
+      <div className="w-full max-w-xl">
+        {children}
+      </div>
     </main>
+  );
+}
+
+function Spinner() {
+  return (
+    <span
+      aria-hidden
+      className="inline-block w-4 h-4 rounded-full border-2 border-[#D1CFC5] border-t-brand-yellow animate-spin"
+    />
   );
 }

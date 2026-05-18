@@ -2,14 +2,15 @@
 
 import { useDropzone } from "react-dropzone";
 import { useCallback } from "react";
+import { Music } from "lucide-react";
 
 const ACCEPT = {
-  "audio/wav": [".wav"],
+  "audio/wav":  [".wav"],
   "audio/mpeg": [".mp3"],
-  "audio/mp4": [".m4a"],
+  "audio/mp4":  [".m4a"],
   "audio/aiff": [".aiff", ".aif"],
   "audio/flac": [".flac"],
-  "audio/ogg": [".ogg"],
+  "audio/ogg":  [".ogg"],
 };
 
 const MAX_BYTES = 50 * 1024 * 1024;
@@ -33,42 +34,66 @@ export function DropZone({ file, onFile, disabled }: Props) {
     disabled,
   });
 
-  const rejectionMessage = fileRejections[0]?.errors[0]?.code === "file-too-large"
-    ? `That file is larger than ${MAX_BYTES / 1024 / 1024} MB.`
-    : fileRejections[0]?.errors[0]?.message;
+  const rejectionMessage =
+    fileRejections[0]?.errors[0]?.code === "file-too-large"
+      ? `That file is larger than ${MAX_BYTES / 1024 / 1024} MB.`
+      : fileRejections[0]?.errors[0]?.message;
 
   return (
     <div>
       <div
         {...getRootProps()}
-        className={`
-          rounded-xl border-2 border-dashed transition-colors
-          flex flex-col items-center justify-center text-center
-          p-10 cursor-pointer
-          ${disabled ? "opacity-50 cursor-not-allowed" : ""}
-          ${isDragActive
-            ? "border-blue-500 bg-blue-50 dark:bg-blue-950/30"
-            : "border-neutral-300 dark:border-neutral-700 hover:border-neutral-400"
-          }
-        `}
+        className={[
+          "relative transition-colors",
+          "flex flex-col items-center justify-center text-center",
+          "py-14 px-8 cursor-pointer select-none",
+          disabled ? "opacity-40 cursor-not-allowed pointer-events-none" : "",
+          isDragActive ? "bg-[#FFFBEB]" : "bg-ivory",
+        ].join(" ")}
       >
         <input {...getInputProps()} />
-        <div className="text-3xl mb-2">♫</div>
-        <p className="text-base font-medium">
-          {isDragActive ? "Drop the audio here" : "Drag an audio file here, or click to choose"}
+
+        {/* Icon */}
+        <div className={[
+          "mb-4 transition-colors",
+          isDragActive ? "text-[#D77908]" : "text-[#999682]",
+        ].join(" ")}>
+          <Music size={32} strokeWidth={1.5} />
+        </div>
+
+        {/* Primary label */}
+        <p className="font-season text-base font-semibold text-ebony">
+          {isDragActive
+            ? "Drop to upload"
+            : file
+              ? "File ready — change it by dropping another"
+              : "Drag an audio file here, or click to choose"}
         </p>
-        <p className="text-sm text-neutral-500 mt-1">
-          wav · mp3 · m4a · aiff · flac · ogg  ·  up to 50 MB · up to 6 min
-        </p>
-        {file && (
-          <p className="mt-4 text-sm text-neutral-700 dark:text-neutral-300">
-            <span className="font-mono">{file.name}</span>
-            <span className="text-neutral-500"> · {(file.size / 1024 / 1024).toFixed(1)} MB</span>
+
+        {/* Format hint */}
+        {!file && (
+          <p className="font-inter text-xs text-[#888888] mt-2 tracking-wide">
+            wav · mp3 · m4a · aiff · flac · ogg &nbsp;·&nbsp; up to 50 MB · up to 6 min
           </p>
         )}
+
+        {/* Selected file row */}
+        {file && (
+          <div className="mt-4 w-full max-w-sm">
+            <span className="flex items-center gap-2 border border-[#D1CFC5] bg-white px-3 py-1.5 rounded-full w-full min-w-0">
+              <span className="font-inter text-xs text-ebony truncate min-w-0 flex-1">{file.name}</span>
+              <span className="font-inter text-xs text-[#888888] flex-shrink-0 whitespace-nowrap">
+                {(file.size / 1024 / 1024).toFixed(1)} MB
+              </span>
+            </span>
+          </div>
+        )}
       </div>
+
       {rejectionMessage && (
-        <p className="mt-2 text-sm text-red-600 dark:text-red-400">{rejectionMessage}</p>
+        <div className="mt-2 border-l-4 border-brand-pink bg-brand-pink-50 px-3 py-2">
+          <p className="font-inter text-xs text-[#92313E]">{rejectionMessage}</p>
+        </div>
       )}
     </div>
   );

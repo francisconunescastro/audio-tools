@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 from collections import Counter
 
 import numpy as np
@@ -977,7 +978,27 @@ def generate_lilypond(
         if (i + 1) % bars_per_line == 0 and i < len(bar_chords) - 1:
             spacer_lines.append("\\break")
 
-    subtitle_line = f'  subtitle = \\markup {{ \\italic "{subtitle}" }}' if subtitle else ""
+    # LilyPond strings need backslashes and double-quotes escaped so that
+    # titles containing punctuation don't blow up the parser.
+    def _ly_escape(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    # Pre-wrap the title in Python so long under-/hyphen-joined filenames
+    # don't overflow the page. `\wordwrap-string` only breaks on whitespace,
+    # so titles like `AUDIO_FILES_…` would otherwise run off the margin.
+    # Width is tuned for the current title fontsize (#4 → ~2× default).
+    title_lines = textwrap.wrap(
+        title, width=26,
+        break_long_words=True,
+        break_on_hyphens=True,
+    ) or [title]
+    title_block = "\n      ".join(f'\\line {{ "{_ly_escape(line)}" }}' for line in title_lines)
+
+    subtitle_safe = _ly_escape(subtitle) if subtitle else ""
+    subtitle_line = (
+        f'  subtitle = \\markup {{ \\override #\'(font-name . "Season Sans SemiBold") "{subtitle_safe}" }}'
+        if subtitle else ""
+    )
     warning = (
         '\\markup {\n  \\vspace #1\n'
         f'  \\italic "⚠  Low confidence ({low_conf_pct:.0f}% of beats) — verify manually."\n}}'
@@ -991,7 +1012,13 @@ def generate_lilypond(
 \\version "2.26.0"
 
 \\header {{
-  title = \\markup {{ \\bold \\fontsize #4 "{title}" }}
+  title = \\markup {{
+    \\override #'(font-name . "Season Musiversal Sans")
+    \\fontsize #4
+    \\center-column {{
+      {title_block}
+    }}
+  }}
 {subtitle_line}
   tagline = ""
 }}
@@ -1357,6 +1384,20 @@ def main() -> None:
         os.unlink(ly_path)
 
     print(f"\n  PDF saved: {pdf_path}")
+
+    # Render a PNG preview of page 1 — embedded PDF viewers are flaky across
+    # browsers/sandboxes, but a flat PNG always shows up in <img>.
+    try:
+        import fitz  # type: ignore[import-not-found]  # PyMuPDF
+        _doc = fitz.open(pdf_path)
+        if _doc.page_count > 0:
+            _pix = _doc[0].get_pixmap(dpi=120)
+            _preview_path = os.path.splitext(pdf_path)[0] + "_preview.png"
+            _pix.save(_preview_path)
+            print(f"  Preview   : {_preview_path}")
+        _doc.close()
+    except Exception as _e:
+        print(f"  [preview] PNG render failed (non-fatal): {_e}")
 
     # Write MusicXML (editable in MuseScore / Sibelius).
     # Failure here must not abort the run — the PDF is the primary artifact.

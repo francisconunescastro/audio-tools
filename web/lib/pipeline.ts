@@ -135,6 +135,7 @@ function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[
   if (s.skipStems)              args.push("--skip-stems");
   if (s.stems && s.stems.length > 0) args.push("--stems", s.stems.join(","));
   if (s.stemModel && s.stemModel !== "htdemucs_6s") args.push("--stem-model", s.stemModel);
+  if (s.sessionType && !s.skipStems) args.push("--session-type", s.sessionType);
 
   return args;
 }

@@ -4,17 +4,10 @@ import type { AdvancedState } from "./AdvancedSettings";
 
 // ---------------------------------------------------------------------------
 // Song info — prominent metadata visible above the advanced panel.
-//
-// These are the headline knobs: the chart's title, subtitle, key, BPM, time
-// signature, and (planned-feature) genre. Everything defaults to "auto" /
-// "filename" so a user can leave them alone if they trust the detector.
 // ---------------------------------------------------------------------------
 
-// Major then minor, ordered by circle of fifths starting from C / Am.
-// The value is the format chord_chart_render.py's --key flag expects.
 export const KEY_OPTIONS: Array<[value: string, label: string]> = [
-  ["auto",      "Auto-detect from audio"],
-  // Major keys
+  ["auto",      "Auto-detect"],
   ["c:major",   "C major"],
   ["g:major",   "G major"],
   ["d:major",   "D major"],
@@ -27,7 +20,6 @@ export const KEY_OPTIONS: Array<[value: string, label: string]> = [
   ["ees:major", "E♭ major"],
   ["bes:major", "B♭ major"],
   ["f:major",   "F major"],
-  // Minor keys
   ["a:minor",   "A minor"],
   ["e:minor",   "E minor"],
   ["b:minor",   "B minor"],
@@ -42,8 +34,6 @@ export const KEY_OPTIONS: Array<[value: string, label: string]> = [
   ["d:minor",   "D minor"],
 ];
 
-// User-visible time-signature choices. "6/8" maps to numerator=6 internally
-// (chord_chart_render handles compound 6/8 when beats-per-bar arrives as 6).
 export const TIME_SIG_OPTIONS: Array<[value: string, label: string]> = [
   ["auto", "Auto-detect"],
   ["2",    "2/4"],
@@ -79,35 +69,36 @@ export function SongInfo({ value, onChange, disabled }: Props) {
   return (
     <fieldset
       disabled={disabled}
-      className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-4 py-4 space-y-4"
+      className="bg-ivory border border-warm-100 px-5 py-4 space-y-4"
     >
+      {/* Header row */}
       <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-sm font-medium">Song info</h2>
-        <span className="text-xs text-neutral-500">All optional — auto-detected if blank</span>
+        <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">
+          Song info
+        </span>
+        <span className="font-inter text-xs text-[#888888]">
+          All optional — auto-detected if blank
+        </span>
       </div>
-      <p className="text-xs text-neutral-500 -mt-2">
-        These end up on the chord chart. The detector usually gets key, BPM, and meter right —
-        override only if you know better, or to nudge a borderline case.
-      </p>
 
-      {/* Title spans the full width, subtitle below */}
-      <div className="space-y-3">
+      {/* Title + subtitle */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <TextField
-          label="Title (chart heading)"
+          label="Title"
           placeholder="Filename will be used"
           value={value.title}
           onChange={(v) => patch("title", v)}
         />
         <TextField
-          label="Subtitle override"
+          label="Subtitle"
           placeholder="Default: Meter · Key · BPM"
           value={value.subtitle}
           onChange={(v) => patch("subtitle", v)}
         />
       </div>
 
-      {/* Headline musical metadata: 4-up grid that wraps on narrow viewports */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      {/* Musical metadata grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <SelectField
           label="Key"
           value={value.key}
@@ -134,15 +125,11 @@ export function SongInfo({ value, onChange, disabled }: Props) {
           options={GENRE_OPTIONS}
         />
       </div>
-      <p className="text-xs text-neutral-500 -mt-1">
-        Genre is captured as metadata for now; future versions will tune chord vocabulary and
-        harmony guides to the genre you pick.
-      </p>
     </fieldset>
   );
 }
 
-// ---------- field primitives (local to this component, kept simple) ----------
+// ---------- field primitives ----------
 
 function TextField({
   label,
@@ -159,13 +146,15 @@ function TextField({
 }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-xs text-neutral-600 dark:text-neutral-400">{label}</span>
+      <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">
+        {label}
+      </span>
       <input
         type={type}
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="px-2 py-1.5 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950"
+        className="font-season text-sm text-ebony bg-white border border-warm-200 px-2.5 py-2 placeholder:text-[#B0B0B0] focus:border-ebony transition-colors outline-none"
       />
     </label>
   );
@@ -184,11 +173,13 @@ function SelectField({
 }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-xs text-neutral-600 dark:text-neutral-400">{label}</span>
+      <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">
+        {label}
+      </span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="px-2 py-1.5 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950"
+        className="font-season text-sm text-ebony bg-white border border-warm-200 px-2.5 py-2 focus:border-ebony transition-colors outline-none appearance-none"
       >
         {options.map(([v, l]) => (
           <option key={v} value={v}>{l}</option>
