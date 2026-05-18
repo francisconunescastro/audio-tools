@@ -12,6 +12,7 @@ type Status = {
   elapsedMs: number;
   startedAt: string;
   finishedAt: string | null;
+  settings?: { sessionType?: string };
 };
 
 type StemInfo = { present: boolean; rms_dbfs_peak: number; loud_seconds: number };
@@ -51,6 +52,7 @@ type Files = {
   musicxml: string | null;
   stabilizedWav: string | null;
   chartJson: string | null;
+  backingTrack: string | null;
   stems: Record<string, string>;
 };
 
@@ -169,6 +171,15 @@ export default function DonePage({ params }: { params: { id: string } }) {
         {/* Stabilised audio */}
         {files?.stabilizedWav && (
           <StabilizedAudioCard jobId={jobId} relPath={files.stabilizedWav} />
+        )}
+
+        {/* Backing track */}
+        {files?.backingTrack && (
+          <BackingTrackCard
+            jobId={jobId}
+            relPath={files.backingTrack}
+            sessionType={status.settings?.sessionType}
+          />
         )}
 
         {/* Stems */}
@@ -319,6 +330,31 @@ function StabilizedAudioCard({ jobId, relPath }: { jobId: string; relPath: strin
       <audio controls preload="metadata" className="w-full" src={src} />
       <p className="font-inter text-xs text-[#B0B0B0]">
         Beat-locked to a single tempo, trimmed to bar 1 — drop into a DAW at the detected BPM.
+      </p>
+    </section>
+  );
+}
+
+function BackingTrackCard({ jobId, relPath, sessionType }: { jobId: string; relPath: string; sessionType?: string }) {
+  const src = `/api/jobs/${jobId}/file?name=${encodeURIComponent(relPath)}`;
+  return (
+    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <SectionLabel>Backing track</SectionLabel>
+          {sessionType && (
+            <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-2.5 py-0.5 rounded-full bg-brand-teal text-white">
+              minus {sessionType}
+            </span>
+          )}
+        </div>
+        <DownloadButton jobId={jobId} relPath={relPath} label="WAV" icon={<Download size={13} strokeWidth={2} />} />
+      </div>
+      <audio controls preload="metadata" className="w-full" src={src} />
+      <p className="font-inter text-xs text-[#B0B0B0]">
+        All stems mixed together
+        {sessionType ? `, excluding ${sessionType}` : ""}
+        — ready to practice or record against.
       </p>
     </section>
   );

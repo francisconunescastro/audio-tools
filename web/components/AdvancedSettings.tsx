@@ -10,6 +10,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 // ---------------------------------------------------------------------------
 
 export type AdvancedState = {
+  sessionType: string;
+
   // Song info (edited by <SongInfo>)
   title: string;
   subtitle: string;
@@ -56,6 +58,8 @@ export type AdvancedState = {
 };
 
 export const DEFAULT_ADVANCED: AdvancedState = {
+  sessionType: "",
+
   title: "",
   subtitle: "",
   bpm: "",
@@ -436,6 +440,7 @@ export function toSettingsPayload(a: AdvancedState) {
     skipStems:    a.skipStems || undefined,
     stems:        a.skipStems || allStems ? undefined : stems,
     stemModel:    a.stemModel,
+    sessionType:  a.sessionType || undefined,
 
     quantizeMelody: a.quantizeMelody ? undefined : false, // only send when off
   };

@@ -141,7 +141,7 @@ export default function UploadPage() {
             </span>
           </div>
           <h1 className="font-display text-[36px] font-bold text-ebony leading-none">
-            audio tools
+            Session Materials Creator
           </h1>
           <p className="font-inter text-sm text-[#6D6D6D] leading-relaxed">
             Drop an audio file. Get back a beat-stabilized WAV, a chord chart PDF, and isolated stems — packaged as a ZIP.
@@ -150,6 +150,15 @@ export default function UploadPage() {
 
         {/* Drop zone */}
         <DropZone file={file} onFile={setFile} disabled={busy} />
+
+        {/* Session type selector */}
+        {file && (
+          <SessionTypeCard
+            value={advanced.sessionType}
+            onChange={(v) => setAdvanced((a) => ({ ...a, sessionType: v }))}
+            disabled={formDisabled}
+          />
+        )}
 
         {/* Analyzing state */}
         {analyzing && <AnalyzingCard filename={file?.name ?? ""} />}
@@ -200,6 +209,60 @@ export default function UploadPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+// ---------- session type ----------
+
+const SESSION_TYPES: Array<{ value: string; label: string }> = [
+  { value: "vocals", label: "Vocals" },
+  { value: "guitar", label: "Guitar" },
+  { value: "bass",   label: "Bass"   },
+  { value: "piano",  label: "Piano"  },
+  { value: "other",  label: "Other"  },
+];
+
+function SessionTypeCard({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">
+          Session type
+        </span>
+        <span className="font-inter text-xs text-[#888888]">
+          {value
+            ? `Backing track = all stems minus ${value}`
+            : "Select to generate a backing track"}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {SESSION_TYPES.map(({ value: v, label }) => (
+          <button
+            key={v}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange(value === v ? "" : v)}
+            className={[
+              "font-season text-sm font-medium px-4 py-1.5 rounded-full border transition-colors",
+              value === v
+                ? "bg-brand-yellow text-ebony border-brand-yellow"
+                : "bg-white text-[#454545] border-[#D1CFC5] hover:border-[#999682]",
+              disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer",
+            ].join(" ")}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

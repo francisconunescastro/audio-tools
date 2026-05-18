@@ -78,6 +78,7 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   const chartJsonName  = entries.find((e) => e.endsWith("_chord_chart.json"))     ?? null;
   // "*_stabilised.wav" — but not the ".bpm" sidecar
   const stabilizedWav  = entries.find((e) => e.endsWith("_stabilised.wav"))       ?? null;
+  const backingTrackWav = entries.find((e) => e.endsWith("_backing_track.wav"))   ?? null;
   const stemsDirName   = entries.find((e) => e.endsWith("_stems"))                ?? null;
 
   // Parse the chord-chart JSON for the analysis card.
@@ -114,6 +115,7 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
       musicxml:      musicxml       ? path.join(inputBase, musicxml)      : null,
       stabilizedWav: stabilizedWav  ? path.join(inputBase, stabilizedWav) : null,
       chartJson:     chartJsonName  ? path.join(inputBase, chartJsonName) : null,
+      backingTrack:  backingTrackWav ? path.join(inputBase, backingTrackWav) : null,
       stems:         stemFiles,
     },
   });
@@ -125,6 +127,7 @@ function emptyFiles() {
     musicxml: null,
     stabilizedWav: null,
     chartJson: null,
+    backingTrack: null,
     stems: {} as Record<string, string>,
   };
 }

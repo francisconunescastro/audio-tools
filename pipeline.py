@@ -118,6 +118,8 @@ Examples:
                        choices=["htdemucs_6s", "htdemucs", "htdemucs_ft", "mdx_extra"],
                        dest="stem_model",
                        help="Demucs model (default: htdemucs_6s = 6 stems)")
+    stems.add_argument("--session-type", default=None, dest="session_type",
+                       help="Session instrument; mix all other stems into <input_base>_backing_track.wav")
 
     p.add_argument("--progress-json", action="store_true", dest="progress_json",
                    help="Emit machine-readable PROGRESS JSON lines on stdout, "
@@ -306,6 +308,7 @@ def main() -> None:
         print("\n[pipeline] Skipping stem splitting.")
     else:
         stems_out = os.path.join(out_dir, input_base + "_stems")
+        backing_track_path = os.path.join(out_dir, input_base + "_backing_track.wav")
         cmd = [
             demucs_python, stem_splitter,
             "-i", stabilised,
@@ -313,6 +316,9 @@ def main() -> None:
             "--model", args.stem_model,
         ]
         if args.stems: cmd += ["--stems", args.stems]
+        if args.session_type:
+            cmd += ["--session-type", args.session_type,
+                    "--backing-track-out", backing_track_path]
         if _PROGRESS_JSON: cmd += ["--progress-json"]
         run_with_progress(
             cmd, "STEP 3 / 3  —  Stem Splitting",
@@ -328,6 +334,8 @@ def main() -> None:
     print(f"     Analysis JSON    : {chart_out}.json")
     if not args.skip_stems:
         print(f"     Stems            : {stems_out}/")
+    if not args.skip_stems and args.session_type:
+        print(f"     Backing track    : {backing_track_path}")
     print(f"{'='*54}\n")
     _emit_global("done", 100.0, "pipeline complete")
 
