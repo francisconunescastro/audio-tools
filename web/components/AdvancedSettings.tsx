@@ -41,7 +41,7 @@ export type AdvancedState = {
   keySnapThreshold: string;
   halfTime: boolean;
   compound: boolean;
-  skipSections: boolean;
+  detectSections: boolean;
 
   // Stems
   skipStems: boolean;
@@ -86,7 +86,7 @@ export const DEFAULT_ADVANCED: AdvancedState = {
   keySnapThreshold: "0.65",
   halfTime: false,
   compound: false,
-  skipSections: false,
+  detectSections: false,
 
   skipStems: false,
   stemVocals: true,
@@ -239,7 +239,7 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
               <Check label="Force 6/8 compound feel" checked={value.compound}      onChange={(v) => patch("compound", v)} />
             </Row>
             <Row>
-              <Check label="Skip section detection (no A/B/C marks)" checked={value.skipSections} onChange={(v) => patch("skipSections", v)} />
+              <Check label="Detect song sections (A/B/C marks)" checked={value.detectSections} onChange={(v) => patch("detectSections", v)} />
             </Row>
 
             {/* Expert threshold knobs */}
@@ -435,7 +435,8 @@ export function toSettingsPayload(a: AdvancedState) {
     keySnapThreshold:  num(a.keySnapThreshold),
     halfTime:          a.halfTime  || undefined,
     compound:          a.compound  || undefined,
-    skipSections:      a.skipSections || undefined,
+    // Sections are off by default; only call MSAF when the user opts in.
+    skipSections:      a.detectSections ? undefined : true,
 
     skipStems:    a.skipStems || undefined,
     stems:        a.skipStems || allStems ? undefined : stems,

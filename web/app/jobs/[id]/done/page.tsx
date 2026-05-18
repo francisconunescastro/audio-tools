@@ -49,6 +49,7 @@ type ChordChart = {
 
 type Files = {
   pdf: string | null;
+  pdfPreview: string | null;
   musicxml: string | null;
   stabilizedWav: string | null;
   chartJson: string | null;
@@ -275,17 +276,47 @@ function ChordChartCard({ chart, files, jobId }: { chart: ChordChart | null; fil
   const ks = chart?.key_snap;
 
   return (
-    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <SectionLabel>Chord chart</SectionLabel>
-        <div className="flex gap-2">
-          {files.pdf && (
-            <DownloadButton jobId={jobId} relPath={files.pdf} label="PDF" icon={<FileText size={13} strokeWidth={2} />} />
-          )}
-          {files.musicxml && (
-            <DownloadButton jobId={jobId} relPath={files.musicxml} label="MusicXML" icon={<FileCode2 size={13} strokeWidth={2} />} />
-          )}
-        </div>
+    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-4">
+      <SectionLabel>Chord chart</SectionLabel>
+
+      {/* PDF page-1 preview — falls back to a plain card if pymupdf didn't run */}
+      {files.pdfPreview && files.pdf && (
+        <a
+          href={`/api/jobs/${jobId}/file?name=${encodeURIComponent(files.pdf)}`}
+          target="_blank"
+          rel="noopener"
+          className="block w-full border border-warm-200 bg-white overflow-hidden"
+          aria-label="Open chord chart PDF"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`/api/jobs/${jobId}/file?name=${encodeURIComponent(files.pdfPreview)}`}
+            alt="Chord chart preview (page 1)"
+            className="block w-full h-auto"
+          />
+        </a>
+      )}
+
+      {/* Primary download CTAs — pill-shaped, PDF in black */}
+      <div className="flex flex-wrap gap-2">
+        {files.pdf && (
+          <a
+            href={`/api/jobs/${jobId}/file?name=${encodeURIComponent(files.pdf)}&download=1`}
+            className="inline-flex items-center gap-2 bg-ebony text-white font-season text-sm font-semibold px-5 py-2.5 rounded-full hover:bg-[#222222] transition-colors"
+          >
+            <FileText size={14} strokeWidth={2} />
+            Download PDF
+          </a>
+        )}
+        {files.musicxml && (
+          <a
+            href={`/api/jobs/${jobId}/file?name=${encodeURIComponent(files.musicxml)}&download=1`}
+            className="inline-flex items-center gap-2 bg-white text-ebony border border-[#D1CFC5] font-season text-sm font-semibold px-5 py-2.5 rounded-full hover:bg-warm-100 transition-colors"
+          >
+            <FileCode2 size={14} strokeWidth={2} />
+            Download MusicXML
+          </a>
+        )}
       </div>
 
       {ci && (

@@ -986,8 +986,9 @@ def generate_lilypond(
     # Pre-wrap the title in Python so long under-/hyphen-joined filenames
     # don't overflow the page. `\wordwrap-string` only breaks on whitespace,
     # so titles like `AUDIO_FILES_…` would otherwise run off the margin.
+    # Width is tuned for the current title fontsize (#4 → ~2× default).
     title_lines = textwrap.wrap(
-        title, width=46,
+        title, width=26,
         break_long_words=True,
         break_on_hyphens=True,
     ) or [title]
@@ -1013,7 +1014,7 @@ def generate_lilypond(
 \\header {{
   title = \\markup {{
     \\override #'(font-name . "Season Musiversal Sans")
-    \\fontsize #-2
+    \\fontsize #4
     \\center-column {{
       {title_block}
     }}
@@ -1383,6 +1384,20 @@ def main() -> None:
         os.unlink(ly_path)
 
     print(f"\n  PDF saved: {pdf_path}")
+
+    # Render a PNG preview of page 1 — embedded PDF viewers are flaky across
+    # browsers/sandboxes, but a flat PNG always shows up in <img>.
+    try:
+        import fitz  # type: ignore[import-not-found]  # PyMuPDF
+        _doc = fitz.open(pdf_path)
+        if _doc.page_count > 0:
+            _pix = _doc[0].get_pixmap(dpi=120)
+            _preview_path = os.path.splitext(pdf_path)[0] + "_preview.png"
+            _pix.save(_preview_path)
+            print(f"  Preview   : {_preview_path}")
+        _doc.close()
+    except Exception as _e:
+        print(f"  [preview] PNG render failed (non-fatal): {_e}")
 
     # Write MusicXML (editable in MuseScore / Sibelius).
     # Failure here must not abort the run — the PDF is the primary artifact.
