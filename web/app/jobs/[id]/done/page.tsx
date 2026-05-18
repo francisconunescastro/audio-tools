@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { Download, Music2, FileText, FileCode2, Mic2, Drum, Guitar, Piano, AudioLines, HelpCircle } from "lucide-react";
 
 type Status = {
   id: string;
@@ -41,14 +42,8 @@ type ChordChart = {
     beat_count?: number;
     beat_interval_cv?: number;
   };
-  madmom_fallback?: {
-    enabled?: boolean;
-    bars_substituted?: number;
-  };
-  key_snap?: {
-    enabled?: boolean;
-    bars_snapped?: number;
-  };
+  madmom_fallback?: { enabled?: boolean; bars_substituted?: number };
+  key_snap?:        { enabled?: boolean; bars_snapped?: number };
 };
 
 type Files = {
@@ -65,14 +60,13 @@ type Metadata = {
   files: Files;
 };
 
-// ---------- formatting helpers ----------
+// ---------- helpers ----------
 
 function formatDuration(ms: number): string {
   const totalSec = Math.round(ms / 1000);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
-  if (m === 0) return `${s} s`;
-  return `${m} min ${s.toString().padStart(2, "0")} s`;
+  return m === 0 ? `${s}s` : `${m}m ${s.toString().padStart(2, "0")}s`;
 }
 
 function formatTime(seconds: number | undefined): string {
@@ -87,195 +81,199 @@ function pct(n: number | undefined, digits = 0): string {
   return `${(n * 100).toFixed(digits)}%`;
 }
 
-// ---------- root page ----------
+// ---------- page ----------
 
 export default function DonePage({ params }: { params: { id: string } }) {
-  const [status, setStatus] = useState<Status | null>(null);
+  const [status,   setStatus]   = useState<Status   | null>(null);
   const [metadata, setMetadata] = useState<Metadata | null>(null);
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
     void (async () => {
       const res = await fetch(`/api/jobs/${params.id}`, { cache: "no-store" });
-      if (res.status === 404) {
-        setNotFound(true);
-        return;
-      }
+      if (res.status === 404) { setNotFound(true); return; }
       if (res.ok) setStatus(await res.json());
       try {
         const m = await fetch(`/api/jobs/${params.id}/metadata`, { cache: "no-store" });
         if (m.ok) setMetadata(await m.json());
-      } catch {
-        // metadata is enhancement; the page still renders without it
-      }
+      } catch { /* enhancement only */ }
     })();
   }, [params.id]);
 
   if (notFound) {
     return (
-      <main className="min-h-screen flex items-center justify-center px-4">
-        <div className="text-center">
-          <h1 className="text-xl font-semibold mb-2">Job not found</h1>
-          <p className="text-sm text-neutral-500 mb-4">It may have been cleaned up after 24 hours.</p>
-          <Link href="/" className="text-blue-600 hover:underline">Back to upload</Link>
+      <Shell>
+        <div className="text-center space-y-3">
+          <h1 className="font-display text-[36px] font-bold text-ebony">Not found</h1>
+          <p className="font-inter text-sm text-[#6D6D6D]">This job may have been cleaned up after 24 hours.</p>
+          <Link href="/" className="font-season text-sm font-semibold underline underline-offset-2 text-ebony">
+            Back to upload
+          </Link>
         </div>
-      </main>
+      </Shell>
     );
   }
 
   if (!status) {
     return (
-      <main className="min-h-screen flex items-center justify-center px-4">
-        <p className="text-sm text-neutral-500">Loading…</p>
-      </main>
+      <Shell>
+        <div className="flex items-center gap-2 text-[#888888]">
+          <span aria-hidden className="inline-block w-4 h-4 rounded-full border-2 border-[#D1CFC5] border-t-brand-yellow animate-spin" />
+          <span className="font-inter text-sm">Loading…</span>
+        </div>
+      </Shell>
     );
   }
 
-  const chart  = metadata?.chordChart ?? null;
-  const stems  = metadata?.stems ?? null;
-  const files  = metadata?.files ?? null;
-  const jobId  = params.id;
+  const chart = metadata?.chordChart ?? null;
+  const stems = metadata?.stems       ?? null;
+  const files = metadata?.files       ?? null;
+  const jobId = params.id;
 
   return (
-    <main className="min-h-screen flex justify-center px-4 py-10">
-      <div className="w-full max-w-3xl space-y-6">
+    <Shell>
+      <div className="space-y-6">
 
-        {/* Header */}
-        <header className="text-center space-y-2">
-          <div className="text-4xl">✓</div>
-          <h1 className="text-2xl font-semibold">Analysis complete</h1>
-          <p className="text-sm text-neutral-500 font-mono break-all">{status.filename}</p>
-          <p className="text-xs text-neutral-500">
+        {/* Success header */}
+        <header className="space-y-1">
+          <span className="inline-flex items-center bg-brand-teal text-white font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
+            Complete
+          </span>
+          <h1 className="font-display text-[48px] font-bold text-ebony leading-none pt-2">
+            Done.
+          </h1>
+          <p className="font-inter text-sm text-[#6D6D6D]">
+            {status.filename}
+            {status.finishedAt && (
+              <> · {new Date(status.finishedAt).toLocaleString()}</>
+            )}
+          </p>
+          <p className="font-inter text-xs text-[#B0B0B0]">
             Processed in {formatDuration(status.elapsedMs)}
-            {status.finishedAt && <> · {new Date(status.finishedAt).toLocaleString()}</>}
           </p>
         </header>
 
-        {/* Analysis summary card */}
+        {/* Stats */}
         {chart && <AnalysisCard chart={chart} />}
 
-        {/* Sections list */}
+        {/* Section map */}
         {chart?.sections && chart.sections.length > 0 && (
           <SectionsCard sections={chart.sections} />
         )}
 
-        {/* Chord chart files (PDF / MusicXML) */}
+        {/* Chord chart */}
         {files && (files.pdf || files.musicxml) && (
           <ChordChartCard chart={chart} files={files} jobId={jobId} />
         )}
 
-        {/* Stabilised audio preview + download */}
+        {/* Stabilised audio */}
         {files?.stabilizedWav && (
           <StabilizedAudioCard jobId={jobId} relPath={files.stabilizedWav} />
         )}
 
-        {/* Stems list with players */}
+        {/* Stems */}
         {stems && Object.keys(stems).length > 0 && files && (
           <StemsCard stems={stems} stemFiles={files.stems} jobId={jobId} />
         )}
 
-        {/* Download everything */}
-        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5 space-y-3 text-center">
+        {/* Download all */}
+        <div className="bg-ebony px-6 py-5 space-y-3">
           <a
             href={`/api/jobs/${jobId}/zip`}
-            className="inline-block w-full rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 py-3"
+            className="flex items-center justify-center gap-2 w-full bg-brand-yellow text-ebony font-season font-semibold text-base py-3 rounded-full hover:bg-[#F3A00D] transition-colors"
           >
+            <Download size={16} strokeWidth={2.5} />
             Download everything (ZIP)
           </a>
-          <p className="text-xs text-neutral-500">
-            Includes stabilised WAV, chord chart PDF + MusicXML, every stem, and the analysis JSON.
+          <p className="font-inter text-xs text-[#999682] text-center">
+            Stabilised WAV · chord chart PDF + MusicXML · stems · analysis JSON
           </p>
         </div>
 
-        <div className="text-center pt-2">
+        <div className="text-center pb-4">
           <Link
             href="/"
-            className="inline-block text-sm text-neutral-600 dark:text-neutral-400 hover:text-blue-600 dark:hover:text-blue-400"
+            className="font-inter text-sm text-[#888888] hover:text-ebony underline underline-offset-2 transition-colors"
           >
-            Process another file →
+            Process another file
           </Link>
         </div>
       </div>
-    </main>
+    </Shell>
   );
 }
 
-// ---------- sub-components ----------
+// ---------- section components ----------
 
 function AnalysisCard({ chart }: { chart: ChordChart }) {
   const bpm = chart.alignment?.detected_bpm;
   return (
-    <section className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5">
-      <h2 className="text-sm font-medium text-neutral-500 mb-3">What we detected</h2>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <Stat label="Key"   value={chart.key ?? "—"} />
-        <Stat label="Meter" value={chart.time_signature ?? "—"} />
-        <Stat label="BPM"   value={bpm !== undefined ? String(Math.round(bpm)) : "—"} />
-        <Stat label="Bars"  value={chart.bars !== undefined ? String(chart.bars) : "—"} />
+    <section className="bg-ivory border border-warm-100">
+      <div className="px-5 pt-4 pb-1">
+        <SectionLabel>Detected</SectionLabel>
+      </div>
+      <div className="grid grid-cols-4 divide-x divide-warm-100">
+        <BigStat label="Key"   value={chart.key              ?? "—"} />
+        <BigStat label="Meter" value={chart.time_signature   ?? "—"} />
+        <BigStat label="BPM"   value={bpm !== undefined ? String(Math.round(bpm)) : "—"} />
+        <BigStat label="Bars"  value={chart.bars !== undefined ? String(chart.bars) : "—"} />
       </div>
     </section>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function BigStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="text-center">
-      <div className="text-xs text-neutral-500 uppercase tracking-wide">{label}</div>
-      <div className="text-xl font-mono mt-1">{value}</div>
+    <div className="py-4 px-4 text-center space-y-0.5">
+      <div className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">{label}</div>
+      <div className="font-display text-2xl font-bold text-ebony">{value}</div>
     </div>
   );
 }
 
 function SectionsCard({ sections }: { sections: Section[] }) {
   return (
-    <section className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5">
-      <h2 className="text-sm font-medium text-neutral-500 mb-3">Song sections</h2>
-      <ul className="space-y-1 text-sm">
+    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
+      <SectionLabel>Song sections</SectionLabel>
+      <ul className="space-y-1">
         {sections.map((s, i) => (
-          <li key={i} className="flex items-center justify-between gap-3 font-mono">
-            <span className="inline-flex items-center gap-3">
-              <span className="inline-flex items-center justify-center w-7 h-7 rounded border border-neutral-300 dark:border-neutral-700 font-semibold">
+          <li key={i} className="flex items-center justify-between gap-4">
+            <span className="flex items-center gap-3">
+              <span className="inline-flex items-center justify-center w-6 h-6 bg-ebony text-ivory font-inter text-[10px] font-semibold tracking-wide">
                 {s.label}
               </span>
-              <span className="text-neutral-700 dark:text-neutral-300">
+              <span className="font-season text-sm text-[#454545]">
                 Bars {s.start_bar}–{s.end_bar}
               </span>
             </span>
-            <span className="text-neutral-500">
+            <span className="font-inter text-xs text-[#888888] tabular-nums">
               {formatTime(s.start_time)} – {formatTime(s.end_time)}
             </span>
           </li>
         ))}
       </ul>
-      <p className="text-xs text-neutral-500 pt-3">
-        Same letter = repeated section (e.g. A returning as the outro). Auto-detected from the audio.
+      <p className="font-inter text-xs text-[#B0B0B0]">
+        Same letter = repeated section. Auto-detected from the audio.
       </p>
     </section>
   );
 }
 
-function ChordChartCard({
-  chart,
-  files,
-  jobId,
-}: {
-  chart: ChordChart | null;
-  files: Files;
-  jobId: string;
-}) {
+function ChordChartCard({ chart, files, jobId }: { chart: ChordChart | null; files: Files; jobId: string }) {
   const ci = chart?.chord_identification;
   const fb = chart?.madmom_fallback;
   const ks = chart?.key_snap;
+
   return (
-    <section className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5 space-y-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-medium text-neutral-500">Chord chart</h2>
+    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <SectionLabel>Chord chart</SectionLabel>
         <div className="flex gap-2">
           {files.pdf && (
-            <DownloadButton jobId={jobId} relPath={files.pdf} label="Download PDF" />
+            <DownloadButton jobId={jobId} relPath={files.pdf} label="PDF" icon={<FileText size={13} strokeWidth={2} />} />
           )}
           {files.musicxml && (
-            <DownloadButton jobId={jobId} relPath={files.musicxml} label="Download MusicXML" />
+            <DownloadButton jobId={jobId} relPath={files.musicxml} label="MusicXML" icon={<FileCode2 size={13} strokeWidth={2} />} />
           )}
         </div>
       </div>
@@ -283,72 +281,77 @@ function ChordChartCard({
       {files.pdf && (
         <iframe
           src={`/api/jobs/${jobId}/file?name=${encodeURIComponent(files.pdf)}#view=FitH`}
-          className="w-full h-96 rounded border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950"
+          className="w-full h-96 border border-warm-200 bg-white"
           title="Chord chart preview"
         />
       )}
 
       {ci && (
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-neutral-600 dark:text-neutral-400 pt-1">
-          <div className="flex justify-between"><dt>Mean confidence</dt>      <dd className="font-mono">{pct(ci.mean_confidence)}</dd></div>
-          <div className="flex justify-between"><dt>Chord changes</dt>        <dd className="font-mono">{ci.chord_changes ?? "—"}</dd></div>
-          <div className="flex justify-between"><dt>Low-confidence bars</dt>  <dd className="font-mono">{ci.low_confidence_pct?.toFixed(1) ?? "—"}%</dd></div>
-          {fb?.enabled && (
-            <div className="flex justify-between"><dt>Madmom-corrected bars</dt><dd className="font-mono">{fb.bars_substituted ?? 0}</dd></div>
-          )}
-          {ks?.enabled && (
-            <div className="flex justify-between"><dt>Key-snapped bars</dt>     <dd className="font-mono">{ks.bars_snapped ?? 0}</dd></div>
-          )}
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-inter text-xs text-[#6D6D6D] pt-1">
+          <Row2 label="Mean confidence"    value={pct(ci.mean_confidence)} />
+          <Row2 label="Chord changes"      value={String(ci.chord_changes ?? "—")} />
+          <Row2 label="Low-confidence bars" value={`${ci.low_confidence_pct?.toFixed(1) ?? "—"}%`} />
+          {fb?.enabled && <Row2 label="Madmom-corrected bars" value={String(fb.bars_substituted ?? 0)} />}
+          {ks?.enabled && <Row2 label="Key-snapped bars"      value={String(ks.bars_snapped ?? 0)} />}
         </dl>
       )}
     </section>
   );
 }
 
+function Row2({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between">
+      <dt>{label}</dt>
+      <dd className="font-mono text-ebony">{value}</dd>
+    </div>
+  );
+}
+
 function StabilizedAudioCard({ jobId, relPath }: { jobId: string; relPath: string }) {
   const src = `/api/jobs/${jobId}/file?name=${encodeURIComponent(relPath)}`;
   return (
-    <section className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5 space-y-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-medium text-neutral-500">Stabilised audio</h2>
-        <DownloadButton jobId={jobId} relPath={relPath} label="Download WAV" />
+    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <SectionLabel>Stabilised audio</SectionLabel>
+        <DownloadButton jobId={jobId} relPath={relPath} label="WAV" icon={<Download size={13} strokeWidth={2} />} />
       </div>
       <audio controls preload="metadata" className="w-full" src={src} />
-      <p className="text-xs text-neutral-500">
-        Beat-locked to a single tempo and trimmed so bar 1 is at the start —
-        drop it into a DAW at the detected BPM and it lines up.
+      <p className="font-inter text-xs text-[#B0B0B0]">
+        Beat-locked to a single tempo, trimmed to bar 1 — drop into a DAW at the detected BPM.
       </p>
     </section>
   );
 }
 
-function StemsCard({
-  stems,
-  stemFiles,
-  jobId,
-}: {
-  stems: Record<string, StemInfo>;
-  stemFiles: Record<string, string>;
-  jobId: string;
-}) {
+const STEM_ICON: Record<string, React.ReactNode> = {
+  vocals: <Mic2    size={14} strokeWidth={2} />,
+  drums:  <Drum    size={14} strokeWidth={2} />,
+  bass:   <Guitar  size={14} strokeWidth={2} />,
+  guitar: <Guitar  size={14} strokeWidth={2} />,
+  piano:  <Piano   size={14} strokeWidth={2} />,
+  other:  <AudioLines size={14} strokeWidth={2} />,
+};
+
+function StemsCard({ stems, stemFiles, jobId }: { stems: Record<string, StemInfo>; stemFiles: Record<string, string>; jobId: string }) {
   const order = ["vocals", "drums", "bass", "guitar", "piano", "other"];
-  const known = order.filter((n) => stems[n]);
+  const known  = order.filter((n) => stems[n]);
   const extras = Object.keys(stems).filter((n) => !order.includes(n));
-  const all = [...known, ...extras];
+  const all    = [...known, ...extras];
   if (all.length === 0) return null;
 
   const presentCount = all.filter((n) => stems[n].present).length;
-  const lowCount = all.length - presentCount;
+  const lowCount     = all.length - presentCount;
 
   return (
-    <section className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-6 py-5 space-y-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-medium text-neutral-500">Stems</h2>
-        <span className="text-xs text-neutral-500">
-          {presentCount} present{lowCount > 0 && <> · {lowCount} low-energy</>}
+    <section className="bg-ivory border border-warm-100 px-5 py-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <SectionLabel>Stems</SectionLabel>
+        <span className="font-inter text-xs text-[#888888]">
+          {presentCount} present{lowCount > 0 && ` · ${lowCount} low-energy`}
         </span>
       </div>
-      <ul className="space-y-3">
+      <ul className="space-y-4">
         {all.map((name) => (
           <StemRow
             key={name}
@@ -359,44 +362,40 @@ function StemsCard({
           />
         ))}
       </ul>
-      <p className="text-xs text-neutral-500">
-        Low-energy stems are usually silent or model bleed — they're still in the ZIP, but the
-        instrument probably isn't in the original mix.
+      <p className="font-inter text-xs text-[#B0B0B0]">
+        Low-energy stems are usually silent or model bleed — still in the ZIP.
       </p>
     </section>
   );
 }
 
-function StemRow({
-  name,
-  info,
-  relPath,
-  jobId,
-}: {
-  name: string;
-  info: StemInfo;
-  relPath: string | null;
-  jobId: string;
-}) {
+function StemRow({ name, info, relPath, jobId }: { name: string; info: StemInfo; relPath: string | null; jobId: string }) {
   const src = relPath ? `/api/jobs/${jobId}/file?name=${encodeURIComponent(relPath)}` : null;
+  const icon = STEM_ICON[name] ?? <HelpCircle size={14} strokeWidth={2} />;
+
   return (
-    <li className="space-y-1">
-      <div className="flex items-baseline justify-between gap-3">
-        <div className="flex items-baseline gap-2">
-          <span aria-hidden className={info.present ? "text-green-600" : "text-amber-600"}>
-            {info.present ? "●" : "○"}
+    <li className="space-y-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          {/* Presence indicator */}
+          <span className={[
+            "inline-flex items-center justify-center w-5 h-5",
+            info.present ? "text-brand-teal" : "text-[#D1CFC5]",
+          ].join(" ")}>
+            {icon}
           </span>
-          <span className="font-mono capitalize">{name}</span>
-          <span className={info.present
-            ? "text-xs text-neutral-500"
-            : "text-xs text-amber-700 dark:text-amber-400"}>
+          <span className="font-season text-sm font-semibold text-ebony capitalize">{name}</span>
+          <span className={[
+            "font-inter text-xs",
+            info.present ? "text-[#888888]" : "text-[#B0B0B0]",
+          ].join(" ")}>
             {info.present
-              ? `peak ${info.rms_dbfs_peak.toFixed(1)} dBFS · ${info.loud_seconds.toFixed(0)}s loud`
-              : `low energy (peak ${info.rms_dbfs_peak.toFixed(1)} dBFS — likely silent or bleed)`}
+              ? `${info.rms_dbfs_peak.toFixed(1)} dBFS · ${info.loud_seconds.toFixed(0)}s`
+              : "low energy — likely silent or bleed"}
           </span>
         </div>
         {relPath && (
-          <DownloadButton jobId={jobId} relPath={relPath} label="Download" small />
+          <DownloadButton jobId={jobId} relPath={relPath} label="WAV" icon={<Download size={11} strokeWidth={2} />} small />
         )}
       </div>
       {src && info.present && (
@@ -406,27 +405,37 @@ function StemRow({
   );
 }
 
-function DownloadButton({
-  jobId,
-  relPath,
-  label,
-  small,
-}: {
-  jobId: string;
-  relPath: string;
-  label: string;
-  small?: boolean;
-}) {
+function DownloadButton({ jobId, relPath, label, icon, small }: { jobId: string; relPath: string; label: string; icon?: React.ReactNode; small?: boolean }) {
   const href = `/api/jobs/${jobId}/file?name=${encodeURIComponent(relPath)}&download=1`;
-  const sizeCls = small
-    ? "px-2.5 py-1 text-xs"
-    : "px-3 py-1.5 text-sm";
   return (
     <a
       href={href}
-      className={`inline-block rounded-md border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 font-medium ${sizeCls}`}
+      className={[
+        "inline-flex items-center gap-1.5 font-inter font-medium",
+        "border border-[#D1CFC5] text-[#454545] hover:bg-white transition-colors",
+        small ? "text-[10px] px-2 py-1" : "text-xs px-3 py-1.5",
+      ].join(" ")}
     >
+      {icon}
       {label}
     </a>
+  );
+}
+
+// ---------- layout helpers ----------
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="min-h-screen bg-white flex justify-center px-4 py-12">
+      <div className="w-full max-w-2xl">{children}</div>
+    </main>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">
+      {children}
+    </p>
   );
 }

@@ -13,10 +13,6 @@ import {
 
 const STORAGE_KEY = "audio-tools.advanced.v1";
 
-// Fields that describe the *song*, not the user's processing preferences.
-// On a new upload we overwrite these from the quick-analysis result so the
-// panel reflects the new file. Everything else (strength, model, threshold
-// knobs, etc.) survives across uploads — that's a user preference.
 const SONG_FIELDS: Array<keyof AdvancedState> = [
   "title", "subtitle", "bpm", "key", "timeSig", "genre",
 ];
@@ -40,32 +36,23 @@ export default function UploadPage() {
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
   const lastAnalyzedFileRef = useRef<File | null>(null);
 
-  // Rehydrate Advanced Settings from localStorage on mount. We deliberately
-  // include song-info fields here — they'll be overwritten as soon as a file
-  // is picked and analysis returns.
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw) as Partial<AdvancedState>;
       setAdvanced((current) => ({ ...current, ...parsed }));
-    } catch {
-      // bad/missing JSON → keep defaults
-    }
+    } catch { /* bad JSON — keep defaults */ }
   }, []);
 
-  // Persist non-song fields only — song info is per-upload.
   useEffect(() => {
     try {
       const persisted: Partial<AdvancedState> = { ...advanced };
       for (const k of SONG_FIELDS) delete persisted[k];
       localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
-    } catch {
-      // quota / private mode — silently skip
-    }
+    } catch { /* quota / private mode */ }
   }, [advanced]);
 
-  // Kick off quick analysis whenever a new file is picked (or cleared).
   useEffect(() => {
     if (!file) {
       lastAnalyzedFileRef.current = null;
@@ -73,7 +60,6 @@ export default function UploadPage() {
       setAnalyzing(false);
       return;
     }
-    // Don't re-analyze the same File reference.
     if (lastAnalyzedFileRef.current === file) return;
     lastAnalyzedFileRef.current = file;
 
@@ -91,14 +77,10 @@ export default function UploadPage() {
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           setError(`Quick analysis failed (${res.status}). ${text}`);
-          setAnalysis({
-            bpm: null, key: null, timeSig: null, durationSeconds: 0,
-            filename: file.name,
-          });
+          setAnalysis({ bpm: null, key: null, timeSig: null, durationSeconds: 0, filename: file.name });
         } else {
           const data = (await res.json()) as AnalyzeResult;
           setAnalysis(data);
-          // Overwrite song-info fields with detected values + filename-based title.
           const baseTitle = file.name.replace(/\.[^.]+$/, "");
           setAdvanced((current) => ({
             ...current,
@@ -111,10 +93,7 @@ export default function UploadPage() {
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : "Network error during analysis.");
-        setAnalysis({
-          bpm: null, key: null, timeSig: null, durationSeconds: 0,
-          filename: file.name,
-        });
+        setAnalysis({ bpm: null, key: null, timeSig: null, durationSeconds: 0, filename: file.name });
       } finally {
         if (!cancelled) setAnalyzing(false);
       }
@@ -147,59 +126,77 @@ export default function UploadPage() {
     }
   }
 
-  // Show the settings cards only after analysis returns. While analysing we
-  // show a lightweight progress card so the user knows something is happening.
   const ready = file !== null && analysis !== null;
   const formDisabled = busy || analyzing;
 
   return (
-    <main className="min-h-screen flex justify-center px-4 py-10">
-      <div className="w-full max-w-2xl space-y-6">
-        <header className="text-center space-y-2">
-          <h1 className="text-3xl font-semibold">audio-tools</h1>
-          <p className="text-neutral-600 dark:text-neutral-400">
+    <main className="min-h-screen bg-white flex justify-center px-4 py-12">
+      <div className="w-full max-w-xl space-y-5">
+
+        {/* Header */}
+        <header className="space-y-3">
+          <div>
+            <span className="inline-flex items-center bg-brand-yellow text-ebony font-inter text-[10px] font-medium uppercase tracking-[0.12em] px-3 py-1 rounded-full">
+              Musiversal
+            </span>
+          </div>
+          <h1 className="font-display text-[36px] font-bold text-ebony leading-none">
+            audio tools
+          </h1>
+          <p className="font-inter text-sm text-[#6D6D6D] leading-relaxed">
             Drop an audio file. Get back a beat-stabilized WAV, a chord chart PDF, and isolated stems — packaged as a ZIP.
           </p>
         </header>
 
+        {/* Drop zone */}
         <DropZone file={file} onFile={setFile} disabled={busy} />
 
+        {/* Analyzing state */}
         {analyzing && <AnalyzingCard filename={file?.name ?? ""} />}
 
+        {/* Analysis warning (partial failure) */}
+        {ready && analysis?.error && (
+          <Callout variant="warning">
+            Auto-detection didn&apos;t complete — fill in the song info manually below.
+          </Callout>
+        )}
+
+        {/* Settings panels */}
         {ready && (
           <>
-            {analysis?.error && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200 px-4 py-3 text-sm">
-                Auto-detection didn&apos;t complete — fill in the song info manually below.
-              </div>
-            )}
             <SongInfo value={advanced} onChange={setAdvanced} disabled={formDisabled} />
             <AdvancedSettings value={advanced} onChange={setAdvanced} disabled={formDisabled} />
           </>
         )}
 
+        {/* Submit error */}
         {error && (
-          <div className="rounded-lg border border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200 px-4 py-3 text-sm">
-            {error}
-          </div>
+          <Callout variant="error">{error}</Callout>
         )}
 
+        {/* CTA */}
         {file && (
           <button
             onClick={onSubmit}
             disabled={!ready || busy}
-            className="w-full rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-neutral-300 dark:disabled:bg-neutral-800 text-white font-medium px-4 py-3 transition-colors"
+            className={[
+              "w-full font-season text-base font-semibold px-6 py-3.5 rounded-full transition-colors",
+              !ready || busy
+                ? "bg-[#E7E5E0] text-[#999682] cursor-not-allowed"
+                : "bg-brand-yellow text-ebony hover:bg-[#F3A00D]",
+            ].join(" ")}
           >
             {busy
               ? "Uploading…"
               : analyzing
-                ? "Analyzing your file…"
+                ? "Analyzing file…"
                 : "Process audio"}
           </button>
         )}
 
-        <p className="text-xs text-neutral-500 text-center">
-          Files are processed locally on your machine. Job artifacts are deleted after 24 hours.
+        {/* Footer */}
+        <p className="font-inter text-xs text-[#B0B0B0] text-center pb-4">
+          Files are processed locally. Job artifacts are deleted after 24 hours.
         </p>
       </div>
     </main>
@@ -208,10 +205,6 @@ export default function UploadPage() {
 
 // ---------- helpers ----------
 
-// The analyzer reports time signature as "4/4", "3/4", "6/8", etc. The
-// Song info <SongInfo> dropdown's `value` is just the numerator string
-// ("4", "3", "6"). Map between them. "6/8" maps to "6" because the chord
-// chart renderer treats numerator=6 as compound duple.
 function timeSigToDropdownValue(s: string | null): string {
   if (!s) return "";
   const m = /^(\d+)\/(\d+)$/.exec(s);
@@ -221,13 +214,13 @@ function timeSigToDropdownValue(s: string | null): string {
 
 function AnalyzingCard({ filename }: { filename: string }) {
   return (
-    <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-4 py-4 flex items-center gap-3">
+    <div className="bg-ivory border border-warm-100 border-l-4 border-l-brand-yellow px-4 py-4 flex items-center gap-3">
       <Spinner />
-      <div className="text-sm">
-        <div className="font-medium">Analyzing your file…</div>
-        <div className="text-xs text-neutral-500 truncate">
-          Quick BPM, key, and meter detection on {filename}. Usually 3–10 seconds.
-        </div>
+      <div>
+        <p className="font-season text-sm font-semibold text-ebony">Analyzing file…</p>
+        <p className="font-inter text-xs text-[#888888] truncate mt-0.5">
+          BPM, key, and meter detection on {filename}
+        </p>
       </div>
     </div>
   );
@@ -237,7 +230,22 @@ function Spinner() {
   return (
     <span
       aria-hidden
-      className="inline-block w-4 h-4 rounded-full border-2 border-neutral-300 dark:border-neutral-700 border-t-blue-600 dark:border-t-blue-400 animate-spin"
+      className="flex-shrink-0 inline-block w-4 h-4 rounded-full border-2 border-[#D1CFC5] border-t-brand-yellow animate-spin"
     />
+  );
+}
+
+type CalloutVariant = "warning" | "error" | "info";
+
+function Callout({ variant, children }: { variant: CalloutVariant; children: React.ReactNode }) {
+  const styles: Record<CalloutVariant, string> = {
+    warning: "bg-brand-yellow-50 border-l-[#F3A00D] text-[#774310]",
+    error:   "bg-brand-pink-50   border-l-brand-pink  text-[#78293A]",
+    info:    "bg-brand-blue-50   border-l-[#29B3C3]   text-[#22505B]",
+  };
+  return (
+    <div className={`border border-[#E7E5E0] border-l-4 px-4 py-3 font-inter text-sm ${styles[variant]}`}>
+      {children}
+    </div>
   );
 }
