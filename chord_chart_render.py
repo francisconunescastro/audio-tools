@@ -15,6 +15,8 @@ Run with the crema venv:
     ./venv_crema/bin/python3.11 chord_chart_render.py -i song.wav --no-bpm --bars-per-line 4
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -24,6 +26,24 @@ import tempfile
 from collections import Counter
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting (enabled by --progress-json; no-op otherwise)
+# ---------------------------------------------------------------------------
+
+_PROGRESS_JSON = False
+
+
+def _emit(sub: str, pct: float, msg: str | None = None) -> None:
+    """Emit a single PROGRESS JSON line on stdout (local 0.0–1.0)."""
+    if not _PROGRESS_JSON:
+        return
+    payload = {"sub": sub, "pct": float(pct)}
+    if msg:
+        payload["msg"] = msg
+    sys.stdout.write(f"PROGRESS {json.dumps(payload)}\n")
+    sys.stdout.flush()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from chord_sheet import (
@@ -670,6 +690,257 @@ def key_override_to_display(key_str: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Structural segmentation (MSAF)
+# ---------------------------------------------------------------------------
+#
+# MSAF picks out section boundaries (intro/verse/chorus/etc.) from the audio
+# and gives each section a numeric cluster label. We translate those into
+# A / B / C / D rehearsal marks that appear above the chord chart, and snap
+# the second-based boundaries to bar starts so the marks line up cleanly.
+
+def detect_sections(
+    audio_path: str,
+    bar_chords: list[dict],
+) -> list[dict]:
+    """
+    Run MSAF on `audio_path` and return a list of section descriptors
+    snapped to bar boundaries:
+
+        [{"label": "A", "start_bar": 1, "end_bar": 12,
+          "start_time": 0.0, "end_time": 24.3,
+          "raw_label": 4.0}, ...]
+
+    The numeric labels MSAF outputs are clustered (repeated sections share
+    the same number); we map them to A, B, C, D... in order of first
+    appearance so the chart reads cleanly.
+
+    Returns [] on any error — MSAF is fragile on short or degenerate audio
+    and section labels are an enhancement, never a blocker.
+    """
+    if not bar_chords:
+        return []
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        # scipy.inf was removed; MSAF imports it at module load.
+        import math, scipy
+        if not hasattr(scipy, "inf"):
+            scipy.inf = math.inf
+        import os, tempfile
+        import msaf
+    except Exception as e:
+        print(f"  [sections] msaf import failed: {e}")
+        return []
+
+    try:
+        # MSAF builds its working paths from `dirname(dirname(audio_file))`.
+        # Stage the audio inside a temp directory it can write to.
+        with tempfile.TemporaryDirectory() as work:
+            audio_dir = os.path.join(work, "ds", "audio")
+            os.makedirs(audio_dir)
+            staged = os.path.join(audio_dir, os.path.basename(audio_path))
+            os.symlink(os.path.abspath(audio_path), staged)
+            boundaries, raw_labels = msaf.process(
+                staged, boundaries_id="sf", labels_id="fmc2d",
+            )
+    except Exception as e:
+        print(f"  [sections] msaf.process failed: {e}")
+        return []
+
+    if len(boundaries) < 2 or len(raw_labels) == 0:
+        return []
+
+    # Bar starts in seconds (for snapping).
+    bar_times = [b["time"] for b in bar_chords]
+    final_t = bar_times[-1] + (bar_times[-1] - bar_times[-2] if len(bar_times) >= 2 else 0.0)
+
+    def snap_to_bar(t: float) -> int:
+        """Return the bar index (0-based) whose start is closest to t."""
+        best_idx = 0
+        best_diff = abs(bar_times[0] - t)
+        for i, bt in enumerate(bar_times):
+            d = abs(bt - t)
+            if d < best_diff:
+                best_diff = d
+                best_idx = i
+        return best_idx
+
+    # Map MSAF's numeric labels to letters by order of first appearance.
+    letter_map: dict[float, str] = {}
+    def letter_for(raw: float) -> str:
+        if raw not in letter_map:
+            letter_map[raw] = chr(ord("A") + len(letter_map))
+        return letter_map[raw]
+
+    sections: list[dict] = []
+    for i, raw in enumerate(raw_labels):
+        seg_start_t = float(boundaries[i])
+        seg_end_t   = float(boundaries[i + 1]) if i + 1 < len(boundaries) else final_t
+
+        start_bar_idx = snap_to_bar(seg_start_t)
+        # End is exclusive — the next section's start. Use that bar minus 1
+        # for end_bar so adjacent sections don't overlap.
+        if i + 1 < len(raw_labels):
+            next_start_bar_idx = snap_to_bar(float(boundaries[i + 1]))
+            end_bar_idx = max(start_bar_idx, next_start_bar_idx - 1)
+        else:
+            end_bar_idx = len(bar_chords) - 1
+
+        # Drop sections shorter than 2 bars. MSAF often spits out 1-bar
+        # boundaries at the very start/end of a song; rendering them as
+        # rehearsal marks would clutter the chart without adding signal.
+        if end_bar_idx - start_bar_idx < 1:
+            continue
+        # Merge into the previous section if the label is identical and they're
+        # adjacent — keeps the rehearsal marks meaningful instead of repeated.
+        letter = letter_for(float(raw))
+        if sections and sections[-1]["label"] == letter and sections[-1]["end_bar"] == start_bar_idx:
+            sections[-1]["end_bar"] = end_bar_idx + 1
+            sections[-1]["end_time"] = seg_end_t
+            continue
+        sections.append({
+            "label":      letter,
+            "start_bar":  start_bar_idx + 1,  # 1-indexed bar numbers
+            "end_bar":    end_bar_idx + 1,
+            "start_time": round(seg_start_t, 2),
+            "end_time":   round(seg_end_t, 2),
+            "raw_label":  float(raw),
+        })
+
+    # Re-letter from A so that the labels are contiguous even after filtering
+    # dropped some short sections from the middle of the original cluster set.
+    if sections:
+        contiguous: dict[str, str] = {}
+        for s in sections:
+            if s["label"] not in contiguous:
+                contiguous[s["label"]] = chr(ord("A") + len(contiguous))
+        for s in sections:
+            s["label"] = contiguous[s["label"]]
+    return sections
+
+
+# ---------------------------------------------------------------------------
+# MusicXML generation  (editable in MuseScore / Sibelius)
+# ---------------------------------------------------------------------------
+#
+# music21's ChordSymbol expects flats spelled as "-" (e.g. "B-m7" for Bbm7) and
+# rejects some labels the rest of the codebase emits ("ø7", "mM7" via parens,
+# etc.).  _crema_to_m21_figure() translates between the two conventions.
+
+# Quality suffix mapping for music21.harmony.ChordSymbol.figure
+_QUALITY_TO_M21 = {
+    "maj":     "",       "min":     "m",
+    "7":       "7",      "maj7":    "maj7",
+    "min7":    "m7",     "dim":     "dim",
+    "dim7":    "dim7",   "hdim7":   "m7b5",
+    "aug":     "aug",    "sus2":    "sus2",
+    "sus4":    "sus4",   "maj6":    "6",
+    "min6":    "m6",     "minmaj7": "mM7",
+}
+
+
+def _crema_to_m21_figure(label: str, use_sharps: bool = False) -> str | None:
+    """
+    Convert a crema-style chord label (e.g. 'Bb:min7', 'C#:maj7') into a
+    music21 ChordSymbol figure string ('B-m7', 'C#maj7').  Returns None for
+    N/X/empty labels which become rests in the score.
+    """
+    if label in ("N", "X", ""):
+        return None
+    root, quality = label.split(":", 1) if ":" in label else (label, "maj")
+    # Normalise spelling to the key's accidental policy first.
+    root = _FLAT_TO_SHARP_ROOT.get(root, root) if use_sharps else _SHARP_TO_FLAT_ROOT.get(root, root)
+    # music21 uses "-" for flat, not "b"
+    if root.endswith("b") and len(root) > 1:
+        root = root[:-1] + "-"
+    return root + _QUALITY_TO_M21.get(quality, "")
+
+
+def bar_chords_to_musicxml(
+    bar_chords: list[dict],
+    beats_per_bar: int,
+    key_root: int,
+    key_mode: str,
+    title: str,
+    time_sig_str: str,
+    use_sharps: bool = False,
+    sections: list[dict] | None = None,
+):
+    """
+    Build a music21 Score containing the chord chart as ChordSymbol events.
+    Returns the Score; caller is responsible for `score.write('musicxml', path)`.
+
+    Each segment lands at the correct beat offset within its measure, so
+    mid-bar chord changes (when our --mid-bar-threshold gate lets them through)
+    survive the export.
+
+    Optional `sections` (from detect_sections) adds music21 RehearsalMark
+    objects at the right measures so MuseScore / Sibelius show A / B / C
+    boxes above the appropriate bars.
+    """
+    from music21 import stream, harmony, meter, key as m21key, metadata, note, expressions
+
+    score = stream.Score()
+    score.metadata = metadata.Metadata(title=title)
+
+    part = stream.Part()
+
+    # Key signature.  music21 wants the root spelled with "-" for flats.
+    root_map = _SEMITONE_TO_ROOT_SHARP if use_sharps else _SEMITONE_TO_ROOT_FLAT
+    key_root_name = root_map[key_root]
+    if key_root_name.endswith("b") and len(key_root_name) > 1:
+        key_root_name = key_root_name[:-1] + "-"
+    # music21.key.Key uses lowercase for minor, capital for major
+    key_tonic = key_root_name if key_mode == "major" else key_root_name.lower()
+    part.append(m21key.Key(key_tonic))
+
+    # Time signature (handle "6/8" specially; everything else is N/4)
+    part.append(meter.TimeSignature(time_sig_str))
+
+    # Each grid beat in our chord grid = 1.0 quarterLength regardless of meter.
+    # In 6/8 this gives a 3.0-ql bar of three quarter-note pulses — chord
+    # placement is correct; MuseScore will display the time signature as 6/8
+    # and render the compound feel.
+    beat_ql = 1.0
+    bar_ql  = beats_per_bar * beat_ql
+
+    # Map bar number → section letter for the bar that opens each section.
+    section_marks: dict[int, str] = {}
+    if sections:
+        for sec in sections:
+            section_marks[sec["start_bar"]] = sec["label"]
+
+    for bar in bar_chords:
+        measure = stream.Measure(number=bar["bar"])
+        if bar["bar"] in section_marks:
+            measure.insert(0.0, expressions.RehearsalMark(section_marks[bar["bar"]]))
+        offset = 0.0
+        for seg in bar["segments"]:
+            figure = _crema_to_m21_figure(seg["chord"], use_sharps)
+            if figure is None:
+                # No chord — insert a rest of the same duration so the measure
+                # accounts for the time correctly.
+                r = note.Rest()
+                r.duration.quarterLength = seg["beats"] * beat_ql
+                measure.insert(offset, r)
+            else:
+                cs = harmony.ChordSymbol(figure)
+                cs.duration.quarterLength = seg["beats"] * beat_ql
+                measure.insert(offset, cs)
+            offset += seg["beats"] * beat_ql
+        # Pad the measure if the segments don't fill it (defensive — they
+        # should already sum to beats_per_bar).
+        if offset < bar_ql:
+            r = note.Rest()
+            r.duration.quarterLength = bar_ql - offset
+            measure.insert(offset, r)
+        part.append(measure)
+
+    score.append(part)
+    return score
+
+
+# ---------------------------------------------------------------------------
 # LilyPond generation
 # ---------------------------------------------------------------------------
 
@@ -683,16 +954,26 @@ def generate_lilypond(
     subtitle: str = "",
     use_sharps: bool = False,
     time_sig_str: str | None = None,
+    sections: list[dict] | None = None,
 ) -> str:
     # time_sig_str overrides the default "{beats_per_bar}/4" — used for 6/8.
     ts = time_sig_str or f"{beats_per_bar}/4"
     bar_spacer = {2: "s2", 3: "s2.", 4: "s1", 6: "s2."}.get(beats_per_bar, "s1")
 
+    # Map bar number (1-indexed) → section letter for the bar that opens each section.
+    # `\mark` belongs to the staff context, so we attach the rehearsal mark to
+    # the matching spacer line. Marks render above the staff with a default box.
+    section_marks: dict[int, str] = {s["start_bar"]: s["label"] for s in (sections or [])}
+
     chord_lines, spacer_lines = [], []
     for i, bar in enumerate(bar_chords):
         tokens = [_ly_chord_token(seg["chord"], seg["beats"], use_sharps) for seg in bar["segments"]]
         chord_lines.append(" ".join(tokens))
-        spacer_lines.append(bar_spacer)
+        spacer = bar_spacer
+        if bar["bar"] in section_marks:
+            label = section_marks[bar["bar"]]
+            spacer = f'\\mark \\markup {{ \\box "{label}" }} {bar_spacer}'
+        spacer_lines.append(spacer)
         if (i + 1) % bars_per_line == 0 and i < len(bar_chords) - 1:
             spacer_lines.append("\\break")
 
@@ -827,11 +1108,19 @@ Examples:
                         "(auto-detected for most 6/8 songs; use this flag as a manual override).")
     p.add_argument("--open",              action="store_true", help="Open PDF when done")
     p.add_argument("--keep-ly",           action="store_true", help="Keep the .ly source file")
+    p.add_argument("--skip-sections",     action="store_true", dest="skip_sections",
+                   help="Skip MSAF structural segmentation. The PDF and MusicXML "
+                        "will have no rehearsal marks. Use this if MSAF segments "
+                        "incorrectly or you don't care about section labels.")
+    p.add_argument("--progress-json",     action="store_true", dest="progress_json",
+                   help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
 
 
 def main() -> None:
+    global _PROGRESS_JSON
     args = parse_args()
+    _PROGRESS_JSON = args.progress_json
 
     if not os.path.isfile(args.input):
         sys.exit(f"File not found: {args.input}")
@@ -841,8 +1130,10 @@ def main() -> None:
     pdf_path  = base + ".pdf"
     ly_path   = base + ".ly"
     json_path = base + ".json"
+    xml_path  = base + ".musicxml"
 
     # 1. Load
+    _emit("load", 0.02, "loading audio")
     print(f"\n[1/5] Loading {args.input} …")
     y, sr = load_audio_mono(args.input, args.sample_rate)
     print(f"  {len(y)/sr:.1f}s  |  {sr} Hz  |  mono")
@@ -869,14 +1160,18 @@ def main() -> None:
     use_sharps = _use_sharps(key_root, key_mode)
 
     # 2. Detect chords
+    _emit("crema", 0.10, "crema chord detection")
     print("\n[2/5] Detecting chords (crema) …")
     times, confidence, labels = detect_chords_crema(y, sr)
+    _emit("crema", 0.45, f"{len(times)} frames")
     hop = int(round((times[1] - times[0]) * sr)) if len(times) > 1 else 4096
     print(f"  {len(times)} frames  |  mean confidence: {confidence.mean():.1%}")
 
     # 3. Detect beats — prefer explicit flag, then sidecar, then auto
+    _emit("beats", 0.50, "beat detection")
     print("\n[3/5] Detecting beats …")
     beat_times = detect_beats(y, sr)
+    _emit("beats", 0.60, f"{len(beat_times)} beats")
     sidecar_bpm = read_bpm_sidecar(args.input) if args.bpm is None else None
     detected_bpm = 60.0 / float(np.median(np.diff(beat_times)))
     bpm = args.bpm or sidecar_bpm or detected_bpm
@@ -919,6 +1214,7 @@ def main() -> None:
     print(f"\n[4/5] Time signature: {time_sig_str} ({_ts_source})")
 
     # 5. Align, simplify, collapse to bars
+    _emit("align", 0.65, "aligning chords to bars")
     print(f"\n[5/5] Aligning chords to beat grid …")
     beat_chords = beat_sync_chords(times, confidence, labels, beat_times, sr, hop)
 
@@ -955,6 +1251,7 @@ def main() -> None:
         if not os.path.isfile(madmom_python):
             print("  [madmom] venv_madmom not found — skipping fallback")
         else:
+            _emit("madmom", 0.75, "madmom fallback")
             print(f"  madmom fallback (bar mean confidence < {args.madmom_threshold:.0%}) …")
             result = subprocess.run(
                 [madmom_python, madmom_script, "--dump-segments", "-i", args.input],
@@ -993,6 +1290,20 @@ def main() -> None:
     low_pct  = 100 * low_conf / max(len(all_segs), 1)
     print(f"  Low-confidence segments: {low_conf}/{len(all_segs)} ({low_pct:.0f}%)")
 
+    # Structural segmentation (sections / rehearsal marks). MSAF is fragile on
+    # short audio so we treat any failure as "no sections" rather than aborting.
+    sections: list[dict] = []
+    if not args.skip_sections:
+        _emit("sections", 0.85, "detecting sections")
+        print("\n  Detecting sections (MSAF) …")
+        sections = detect_sections(args.input, bar_chords)
+        if sections:
+            print(f"  → {len(sections)} section(s): " + ", ".join(
+                f"{s['label']}(bars {s['start_bar']}-{s['end_bar']})" for s in sections
+            ))
+        else:
+            print(f"  → no sections detected (continuing without rehearsal marks)")
+
     madmom_bar_set  = set(madmom_substituted)
     key_snap_bar_set = set(key_snapped)
     print("\n  Chord summary (changes only):")
@@ -1021,12 +1332,14 @@ def main() -> None:
         if not args.no_bpm:   parts.append(f"BPM: {round(bpm)}")
         subtitle = "  ·  ".join(parts)
 
+    _emit("render", 0.90, "rendering PDF")
     print(f"\nRendering PDF …  ({subtitle or 'no subtitle'})")
     ly_src = generate_lilypond(
         bar_chords, title=title, beats_per_bar=beats_per_bar,
         key_stmt=key_stmt, bars_per_line=args.bars_per_line,
         low_conf_pct=low_pct, subtitle=subtitle,
         use_sharps=use_sharps, time_sig_str=time_sig_str,
+        sections=sections,
     )
 
     with open(ly_path, "w") as f:
@@ -1044,6 +1357,26 @@ def main() -> None:
         os.unlink(ly_path)
 
     print(f"\n  PDF saved: {pdf_path}")
+
+    # Write MusicXML (editable in MuseScore / Sibelius).
+    # Failure here must not abort the run — the PDF is the primary artifact.
+    musicxml_written: str | None = None
+    try:
+        score = bar_chords_to_musicxml(
+            bar_chords,
+            beats_per_bar = beats_per_bar,
+            key_root      = key_root,
+            key_mode      = key_mode,
+            title         = title,
+            time_sig_str  = time_sig_str,
+            use_sharps    = use_sharps,
+            sections      = sections,
+        )
+        score.write("musicxml", fp=xml_path)
+        musicxml_written = xml_path
+        print(f"  MusicXML  : {xml_path}")
+    except Exception as e:
+        print(f"  [musicxml] export failed (non-fatal): {e}")
 
     # Write analysis JSON
     beat_intervals = np.diff(beat_times)
@@ -1081,10 +1414,22 @@ def main() -> None:
             "bars_snapped":         len(key_snapped),
             "snapped_bar_numbers":  key_snapped,
         },
+        "musicxml": musicxml_written,
+        "sections": [
+            {
+                "label":      s["label"],
+                "start_bar":  s["start_bar"],
+                "end_bar":    s["end_bar"],
+                "start_time": s["start_time"],
+                "end_time":   s["end_time"],
+            }
+            for s in sections
+        ],
     }
     with open(json_path, "w") as f:
         json.dump(analysis, f, indent=2)
     print(f"  Analysis  : {json_path}")
+    _emit("render", 1.0, "done")
 
     if args.open:
         subprocess.run(["open", pdf_path])

@@ -22,7 +22,10 @@ compares beat count vs expected count and uses 2× anchor density when a
 half-time groove is detected.
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -66,6 +69,9 @@ Examples:
     p.set_defaults(trim_intro=True)
     stab.add_argument("--beats-per-bar",  type=int, default=4, dest="beats_per_bar",
                       help="Beats per bar for the intro trim length (default: 4)")
+    stab.add_argument("--allow-tempo-change", action="store_true", dest="allow_tempo_change",
+                      help="Continue even if a sustained tempo change is detected. "
+                           "Default behaviour is to stop with EARLY_STOP so the caller can warn.")
 
     # ── Chord chart ─────────────────────────────────────────
     chart = p.add_argument_group("Chord chart")
@@ -74,6 +80,8 @@ Examples:
     chart.add_argument("--time-sig",      type=int, default=None, dest="time_sig",
                        help="Beats per bar (default: auto)")
     chart.add_argument("--bars-per-line", type=int, default=4, dest="bars_per_line")
+    chart.add_argument("--skip-sections", action="store_true", dest="skip_sections",
+                       help="Skip MSAF structural segmentation (no A/B/C rehearsal marks).")
     chart.add_argument("--no-bpm",          action="store_true", help="Omit BPM from chart subtitle")
     chart.add_argument("--no-key",          action="store_true", help="Omit key from chart subtitle")
     chart.add_argument("--no-meter",        action="store_true", help="Omit meter from chart subtitle")
@@ -111,7 +119,29 @@ Examples:
                        dest="stem_model",
                        help="Demucs model (default: htdemucs_6s = 6 stems)")
 
+    p.add_argument("--progress-json", action="store_true", dest="progress_json",
+                   help="Emit machine-readable PROGRESS JSON lines on stdout, "
+                        "remapping each child stage onto a global 0..100 scale.")
+
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Progress remapping
+# ---------------------------------------------------------------------------
+
+_PROGRESS_JSON = False
+
+
+def _emit_global(stage: str, pct: float, msg: str | None = None) -> None:
+    """Emit a PROGRESS line on stdout in the global 0..100 scale."""
+    if not _PROGRESS_JSON:
+        return
+    payload = {"stage": stage, "pct": round(float(pct), 2)}
+    if msg:
+        payload["msg"] = msg
+    sys.stdout.write(f"PROGRESS {json.dumps(payload)}\n")
+    sys.stdout.flush()
 
 
 def run(cmd: list[str], label: str) -> None:
@@ -123,8 +153,64 @@ def run(cmd: list[str], label: str) -> None:
         sys.exit(f"\n✗  {label} failed (exit {result.returncode}).")
 
 
+def run_with_progress(
+    cmd: list[str],
+    label: str,
+    stage: str,
+    pct_start: float,
+    pct_end: float,
+) -> None:
+    """Run a child process, parsing PROGRESS JSON lines from its stdout and
+    remapping them onto the global [pct_start, pct_end] window.
+
+    Non-PROGRESS stdout is passed through unchanged so existing debug
+    output is preserved.
+    """
+    print(f"\n{'='*54}")
+    print(f"  {label}")
+    print(f"{'='*54}")
+
+    if not _PROGRESS_JSON:
+        # Fast path: no progress parsing needed.
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            sys.exit(f"\n✗  {label} failed (exit {result.returncode}).")
+        return
+
+    _emit_global(stage, pct_start, label)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=None,           # inherit — pipeline.py forwards demucs tqdm etc.
+        bufsize=1,
+        text=True,
+    )
+    assert proc.stdout is not None
+    span = pct_end - pct_start
+    for raw in proc.stdout:
+        line = raw.rstrip("\n")
+        if line.startswith("PROGRESS "):
+            try:
+                payload = json.loads(line[len("PROGRESS "):])
+                local_pct = float(payload.get("pct", 0.0))
+                global_pct = pct_start + max(0.0, min(1.0, local_pct)) * span
+                _emit_global(stage, global_pct, payload.get("msg"))
+                continue
+            except (ValueError, json.JSONDecodeError):
+                pass
+        # Pass through any non-PROGRESS line unchanged
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+    ret = proc.wait()
+    if ret != 0:
+        sys.exit(f"\n✗  {label} failed (exit {ret}).")
+    _emit_global(stage, pct_end, f"{label} done")
+
+
 def main() -> None:
+    global _PROGRESS_JSON
     args = parse_args()
+    _PROGRESS_JSON = args.progress_json
 
     if not os.path.isfile(args.input):
         sys.exit(f"File not found: {args.input}")
@@ -146,6 +232,26 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
     title = args.title or input_base
 
+    # ── Global progress allocation ─────────────────────────
+    # Default ranges: stabilize 0–10, chord 10–40, stems 40–100.
+    # When a stage is skipped, its share is redistributed proportionally
+    # across the remaining stages.
+    weights = {
+        "stabilize": 0.0 if args.skip_stabilize else 10.0,
+        "chord":     30.0,
+        "stems":     0.0 if args.skip_stems else 60.0,
+    }
+    total_w = sum(weights.values()) or 1.0
+    scale   = 100.0 / total_w
+    cursor  = 0.0
+    ranges: dict[str, tuple[float, float]] = {}
+    for stage in ("stabilize", "chord", "stems"):
+        w = weights[stage] * scale
+        ranges[stage] = (cursor, cursor + w)
+        cursor += w
+
+    _emit_global("start", 0.0, "pipeline starting")
+
     # ── Step 1 / 3  —  Beat stabilization ───────────────────
     if args.skip_stabilize:
         print("\n[pipeline] Skipping beat stabilization.")
@@ -157,7 +263,12 @@ def main() -> None:
         if args.strength != 1.0:    cmd += ["--strength",      str(args.strength)]
         if not args.trim_intro:     cmd += ["--no-trim-intro"]
         if args.beats_per_bar != 4: cmd += ["--beats-per-bar", str(args.beats_per_bar)]
-        run(cmd, "STEP 1 / 3  —  Beat Stabilization")
+        if args.allow_tempo_change: cmd += ["--allow-tempo-change"]
+        if _PROGRESS_JSON:          cmd += ["--progress-json"]
+        run_with_progress(
+            cmd, "STEP 1 / 3  —  Beat Stabilization",
+            "stabilize", *ranges["stabilize"],
+        )
 
     # ── Step 2 / 3  —  Chord chart ──────────────────────────
     chart_out = os.path.join(out_dir, input_base + "_chord_chart")
@@ -182,8 +293,13 @@ def main() -> None:
     if args.key_snap_threshold != 0.65:       cmd += ["--key-snap-threshold", str(args.key_snap_threshold)]
     if args.half_time:                        cmd += ["--half-time"]
     if args.compound:                         cmd += ["--compound"]
+    if args.skip_sections:                    cmd += ["--skip-sections"]
     if args.open:                             cmd += ["--open"]
-    run(cmd, "STEP 2 / 3  —  Chord Chart")
+    if _PROGRESS_JSON:                        cmd += ["--progress-json"]
+    run_with_progress(
+        cmd, "STEP 2 / 3  —  Chord Chart",
+        "chord", *ranges["chord"],
+    )
 
     # ── Step 3 / 3  —  Stem splitting ───────────────────────
     if args.skip_stems:
@@ -197,7 +313,11 @@ def main() -> None:
             "--model", args.stem_model,
         ]
         if args.stems: cmd += ["--stems", args.stems]
-        run(cmd, "STEP 3 / 3  —  Stem Splitting")
+        if _PROGRESS_JSON: cmd += ["--progress-json"]
+        run_with_progress(
+            cmd, "STEP 3 / 3  —  Stem Splitting",
+            "stems", *ranges["stems"],
+        )
 
     # ── Summary ──────────────────────────────────────────────
     print(f"\n{'='*54}")
@@ -209,6 +329,7 @@ def main() -> None:
     if not args.skip_stems:
         print(f"     Stems            : {stems_out}/")
     print(f"{'='*54}\n")
+    _emit_global("done", 100.0, "pipeline complete")
 
 
 if __name__ == "__main__":

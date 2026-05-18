@@ -16,6 +16,24 @@ Three tools that work together:
 
 ---
 
+## Web UI (local)
+
+A browser-based wrapper lives under `web/`. Drop a file, watch progress, download a ZIP. Runs entirely on your machine — see [`docs/web-mvp-prd.md`](docs/web-mvp-prd.md) for design and roadmap.
+
+```bash
+bash setup.sh                # one-time: installs ffmpeg, rubberband, LilyPond, the three venvs
+cd web && npm install        # one-time: web dependencies
+npm run dev                  # then open http://localhost:3000
+```
+
+Limits: 50 MB upload, ~6 min audio, single concurrent job per server, artifacts auto-deleted after 24 h.
+
+Job artifacts (the uploaded audio, intermediate files, output ZIPs) are written to
+`$TMPDIR/audio-tools-jobs/` (e.g. `/var/folders/.../T/audio-tools-jobs` on macOS,
+`/tmp/audio-tools-jobs` on Linux). Set `AUDIO_TOOLS_JOBS_DIR=/custom/path` to override.
+
+---
+
 ## Setup
 
 Run once after cloning or downloading:

@@ -23,6 +23,15 @@ import sys
 
 import numpy as np
 
+# madmom pins are old enough that it imports MutableSequence/etc. directly
+# from `collections`, which Python 3.10+ moved to `collections.abc`. Patch
+# the names back onto `collections` before any madmom module is imported.
+import collections, collections.abc
+for _name in ('MutableSequence', 'Mapping', 'MutableMapping', 'Iterable',
+              'Hashable', 'Callable', 'Sequence', 'Set', 'MutableSet'):
+    if not hasattr(collections, _name):
+        setattr(collections, _name, getattr(collections.abc, _name))
+
 # madmom's compiled Cython (hmm.pyx) references np.int / np.float / etc.,
 # which were removed in NumPy 1.24.  Restore the aliases before any madmom
 # module is imported so the compiled extension can initialise without error.

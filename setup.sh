@@ -67,15 +67,23 @@ echo "[ 4 / 6 ]  Creating madmom virtual environment (Python 3.11) …"
 python3.11 -m venv venv_madmom
 ./venv_madmom/bin/pip install --upgrade pip --quiet
 
+# setuptools<70 keeps pkg_resources around — madmom 0.16 imports it at the
+# top of madmom/__init__.py, and newer setuptools drops it from the default
+# install. Pin to the same constraint we already use in venv_crema.
+./venv_madmom/bin/pip install "setuptools<70" --quiet
+
 # Step 1: install build dependencies first
 ./venv_madmom/bin/pip install "numpy>=1.20,<2.0" Cython --quiet
 
-# Step 2: install madmom (compiles Cython extensions against the numpy above)
+# Step 2: install madmom (compiles Cython extensions against the numpy above).
+# --no-build-isolation is required because madmom's setup.py imports numpy and
+# Cython directly; without it, pip spins up a fresh build env that doesn't see
+# the build deps we installed above and the build fails with ModuleNotFoundError.
 if [[ "$(uname -m)" == "arm64" ]]; then
     echo "  Apple Silicon detected — setting ARCHFLAGS for arm64 …"
-    ARCHFLAGS="-arch arm64" ./venv_madmom/bin/pip install madmom
+    ARCHFLAGS="-arch arm64" ./venv_madmom/bin/pip install --no-build-isolation madmom
 else
-    ./venv_madmom/bin/pip install madmom
+    ./venv_madmom/bin/pip install --no-build-isolation madmom
 fi
 
 # Step 3: install remaining runtime deps
