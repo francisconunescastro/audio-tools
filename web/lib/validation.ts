@@ -6,9 +6,25 @@ export const ALLOWED_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".aiff", ".ai
 
 const stemOptions = ["vocals", "drums", "bass", "guitar", "piano", "other"] as const;
 
+// Genre is captured as metadata on the job for now — the pipeline doesn't
+// consume it yet. When the genre-aware chord vocabulary / harmony-guide work
+// from the spec lands, this field is the hook point.
+export const GENRE_OPTIONS = [
+  "auto",
+  "pop_rock",
+  "folk",
+  "jazz",
+  "rnb",
+  "funk",
+  "country",
+  "electronic",
+  "classical",
+] as const;
+
 export const SettingsSchema = z.object({
   title: z.string().trim().max(200).optional(),
   openPdf: z.boolean().optional(),
+  genre: z.enum(GENRE_OPTIONS).optional(),
 
   // Beat stabilizer
   bpm: z.number().positive().max(400).optional(),

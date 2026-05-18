@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { DropZone } from "@/components/DropZone";
+import { SongInfo } from "@/components/SongInfo";
 import {
   AdvancedSettings,
   DEFAULT_ADVANCED,
@@ -75,6 +76,8 @@ export default function UploadPage() {
         </header>
 
         <DropZone file={file} onFile={setFile} disabled={busy} />
+
+        <SongInfo value={advanced} onChange={setAdvanced} disabled={busy} />
 
         <AdvancedSettings value={advanced} onChange={setAdvanced} disabled={busy} />
 
