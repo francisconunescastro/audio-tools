@@ -141,6 +141,8 @@ def detect_beats_madmom(
     y_mono: np.ndarray,
     sr: int,
     bpb_options: list[int] | None = None,
+    fps: int = 100,
+    timeout_s: int = 240,
 ) -> tuple[np.ndarray, np.ndarray | None, int | None]:
     """
     Run madmom's RNN + DBN tracker, preferring the downbeat-aware version.
@@ -195,6 +197,7 @@ import itertools as it
 
 audio = sys.argv[1]
 bpb = {bpb_options!r}
+FPS = {fps!r}
 
 # Monkey-patch DBNDownBeatTrackingProcessor.process(): the upstream
 # implementation does `np.asarray(results)[:, 1]` where results is a list of
@@ -246,7 +249,7 @@ DBNDownBeatTrackingProcessor.process = _patched_process
 try:
     from madmom.features.downbeats import RNNDownBeatProcessor
     act = RNNDownBeatProcessor()(audio)
-    out = DBNDownBeatTrackingProcessor(beats_per_bar=bpb, fps=100)(act)
+    out = DBNDownBeatTrackingProcessor(beats_per_bar=bpb, fps=FPS)(act)
     # out shape: (n, 2) — (time_seconds, position_in_bar_1_indexed)
     arr = np.asarray(out)
     beats = arr[:, 0].tolist()
@@ -263,7 +266,7 @@ except Exception as e:
     # Fall back to the beats-only tracker.
     from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
     act = RNNBeatProcessor()(audio)
-    beats = DBNBeatTrackingProcessor(fps=100)(act)
+    beats = DBNBeatTrackingProcessor(fps=FPS)(act)
     print(json.dumps({{
         "beats": np.asarray(beats).tolist(),
         "downbeat_indices": None,
@@ -281,7 +284,7 @@ except Exception as e:
 """
             result = subprocess.run(
                 [madmom_python, "-c", code, tmp_path],
-                capture_output=True, text=True, timeout=240,
+                capture_output=True, text=True, timeout=timeout_s,
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr[-400:])
@@ -299,16 +302,25 @@ except Exception as e:
     from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
     sig = y_mono.astype(np.float32)
     act = RNNBeatProcessor()(sig)
-    return np.asarray(DBNBeatTrackingProcessor(fps=100)(act), dtype=float), None, None
+    return np.asarray(DBNBeatTrackingProcessor(fps=fps)(act), dtype=float), None, None
 
 
-def detect_beats_librosa(y_mono: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
-    tempo, beat_frames = librosa.beat.beat_track(y=y_mono, sr=sr, units="frames")
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+def detect_beats_librosa(
+    y_mono: np.ndarray,
+    sr: int,
+    start_bpm: float = 120.0,
+    tightness: float = 100.0,
+    hop_length: int = 512,
+) -> tuple[np.ndarray, float]:
+    tempo, beat_frames = librosa.beat.beat_track(
+        y=y_mono, sr=sr, units="frames",
+        start_bpm=start_bpm, tightness=tightness, hop_length=hop_length,
+    )
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
 
     if len(beat_times) < 2:
         print("  [librosa] beat_track found <2 beats, switching to onset detection …")
-        beat_times = librosa.onset.onset_detect(y=y_mono, sr=sr, units="time")
+        beat_times = librosa.onset.onset_detect(y=y_mono, sr=sr, units="time", hop_length=hop_length)
         tempo = _bpm_from_times(beat_times) if len(beat_times) >= 2 else 120.0
 
     return np.asarray(beat_times, dtype=float), float(np.atleast_1d(tempo)[0])
@@ -335,16 +347,37 @@ def detect_beats(
     y: np.ndarray,
     sr: int,
     bpb_options: list[int] | None = None,
+    backend: str = "auto",
+    madmom_fps: int = 100,
+    madmom_timeout_s: int = 240,
+    librosa_start_bpm: float = 120.0,
+    librosa_tightness: float = 100.0,
+    librosa_hop_length: int = 512,
 ) -> tuple[np.ndarray, float, np.ndarray | None, int | None]:
     """
     Beat (and downbeat, when available) detection.
 
+    `backend` is one of:
+      - "auto"    : try madmom, fall back to librosa
+      - "madmom"  : madmom only (errors propagate)
+      - "librosa" : librosa only (no downbeat info)
+
     Returns (beat_times, bpm, downbeat_indices, meter).
     `downbeat_indices` and `meter` are None when the downbeat tracker
-    couldn't run or fell back to librosa.
+    couldn't run or the librosa backend was used.
     """
     y_mono = y.mean(axis=1) if y.ndim == 2 else y
     duration_s = (len(y) if y.ndim == 1 else y.shape[0]) / sr
+
+    if backend == "librosa":
+        beat_times, bpm = detect_beats_librosa(
+            y_mono, sr,
+            start_bpm=librosa_start_bpm,
+            tightness=librosa_tightness,
+            hop_length=librosa_hop_length,
+        )
+        print(f"  [librosa] {len(beat_times)} beats  |  {bpm:.2f} BPM")
+        return beat_times, bpm, None, None
 
     stop_event = threading.Event()
     if _PROGRESS_JSON:
@@ -355,7 +388,10 @@ def detect_beats(
 
     try:
         beat_times, downbeat_indices, meter = detect_beats_madmom(
-            y_mono, sr, bpb_options=bpb_options,
+            y_mono, sr,
+            bpb_options=bpb_options,
+            fps=madmom_fps,
+            timeout_s=madmom_timeout_s,
         )
         bpm = _bpm_from_times(beat_times)
         if downbeat_indices is not None and meter is not None:
@@ -365,13 +401,20 @@ def detect_beats(
             print(f"  [madmom] {len(beat_times)} beats  |  {bpm:.2f} BPM  (downbeats unavailable)")
         return beat_times, bpm, downbeat_indices, meter
     except Exception as e:
+        if backend == "madmom":
+            raise
         print(f"  [madmom] not available ({e}), falling back to librosa …")
     finally:
         stop_event.set()
         if t is not None:
             t.join(timeout=1)
 
-    beat_times, bpm = detect_beats_librosa(y_mono, sr)
+    beat_times, bpm = detect_beats_librosa(
+        y_mono, sr,
+        start_bpm=librosa_start_bpm,
+        tightness=librosa_tightness,
+        hop_length=librosa_hop_length,
+    )
     print(f"  [librosa] {len(beat_times)} beats  |  {bpm:.2f} BPM")
     return beat_times, bpm, None, None
 
@@ -391,6 +434,8 @@ def detect_tempo_change(
     downbeat_indices: np.ndarray | None,
     window_bars: int = 8,
     persist_bars: int = 4,
+    threshold_pct: float = 0.06,
+    threshold_floor_bpm: float = 6.0,
 ) -> dict | None:
     """
     Detect a sustained arrangement-level tempo change.
@@ -475,7 +520,7 @@ def detect_tempo_change(
         prev_bpm = float(smoothed[i - 1])
         curr_bpm = float(smoothed[i])
         delta = abs(curr_bpm - prev_bpm)
-        threshold = max(6.0, 0.06 * prev_bpm)
+        threshold = max(threshold_floor_bpm, threshold_pct * prev_bpm)
         if delta < threshold:
             continue
         # Check persistence: every smoothed value in [i, i+persist_bars]
@@ -515,7 +560,14 @@ def build_timemap(beat_samples: np.ndarray, target_samples: np.ndarray, n_total:
     return np.array(clean, dtype=np.int32)
 
 
-def stabilize(y: np.ndarray, sr: int, beat_times: np.ndarray, target_bpm: float, strength: float = 1.0) -> np.ndarray:
+def stabilize(
+    y: np.ndarray,
+    sr: int,
+    beat_times: np.ndarray,
+    target_bpm: float,
+    strength: float = 1.0,
+    crispness: int | None = None,
+) -> np.ndarray:
     beat_interval_samples = sr * 60.0 / target_bpm
     beat_samples = np.round(beat_times * sr).astype(np.int64)
 
@@ -532,7 +584,12 @@ def stabilize(y: np.ndarray, sr: int, beat_times: np.ndarray, target_bpm: float,
     timemap = build_timemap(beat_samples, target_samples, n_total)
 
     print(f"  Warping {len(timemap)-2} beat anchors …")
-    return pyrb.timemap_stretch(y, sr, timemap)
+    # pyrubberband exposes rubberband's --crispness flag via rbargs. 0 = smooth,
+    # 6 = sharp transients. None = library default.
+    rbargs: dict | None = None
+    if crispness is not None:
+        rbargs = {"--crispness": str(int(crispness))}
+    return pyrb.timemap_stretch(y, sr, timemap, rbargs=rbargs) if rbargs else pyrb.timemap_stretch(y, sr, timemap)
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +631,41 @@ Examples:
                         "Default: stop and emit EARLY_STOP so the caller can warn the user. "
                         "Enable only if you accept that the warp will be musically wrong "
                         "across the tempo boundary.")
+    p.add_argument("--intro-trim-bars",   type=int, default=1, dest="intro_trim_bars",
+                   help="How many bars to include before the first detected beat when "
+                        "--trim-intro is on (default: 1)")
+    # Detector backend & library-level knobs.
+    det = p.add_argument_group("Beat detector (library knobs)")
+    det.add_argument("--detector-backend", default="auto",
+                     choices=("auto", "madmom", "librosa"), dest="detector_backend",
+                     help="Beat detector to use (default: auto — madmom then librosa)")
+    det.add_argument("--madmom-bpb-options", default="3,4", dest="madmom_bpb_options",
+                     help="Comma-separated candidate beats-per-bar for the madmom "
+                          "downbeat tracker (default: 3,4)")
+    det.add_argument("--madmom-fps",       type=int,   default=100, dest="madmom_fps",
+                     help="madmom RNN/DBN frame rate in Hz (default: 100)")
+    det.add_argument("--madmom-timeout-s", type=int,   default=240, dest="madmom_timeout_s",
+                     help="Seconds before the madmom subprocess is aborted (default: 240)")
+    det.add_argument("--librosa-start-bpm", type=float, default=120.0, dest="librosa_start_bpm",
+                     help="Initial tempo guess for librosa.beat.beat_track (default: 120)")
+    det.add_argument("--librosa-tightness", type=float, default=100.0, dest="librosa_tightness",
+                     help="librosa beat-tracker onset-strength weighting (default: 100)")
+    det.add_argument("--librosa-hop-length", type=int, default=512, dest="librosa_hop_length",
+                     help="librosa STFT hop length in samples (default: 512)")
+    # Tempo-change guard knobs.
+    tc = p.add_argument_group("Tempo-change guard")
+    tc.add_argument("--tempo-change-window-bars",  type=int, default=8, dest="tempo_change_window_bars",
+                    help="Rolling-median window for the tempo-change scanner (default: 8 bars)")
+    tc.add_argument("--tempo-change-persist-bars", type=int, default=4, dest="tempo_change_persist_bars",
+                    help="Bars the new tempo must persist before the guard fires (default: 4)")
+    tc.add_argument("--tempo-change-threshold-pct", type=float, default=0.06, dest="tempo_change_threshold_pct",
+                    help="Percentage tempo step that counts as a change (default: 0.06 = 6%%)")
+    tc.add_argument("--tempo-change-threshold-floor", type=float, default=6.0, dest="tempo_change_threshold_floor",
+                    help="Minimum absolute BPM step that counts as a change (default: 6)")
+    # Warp engine knobs.
+    p.add_argument("--pyrb-crispness", type=int, default=None, dest="pyrb_crispness",
+                   help="rubberband --crispness (0=smoothest, 6=sharpest transients). "
+                        "Default: library default.")
     p.add_argument("--progress-json",     action="store_true", dest="progress_json",
                    help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
@@ -609,7 +701,17 @@ def main() -> None:
 
     _emit("detect_beats", 0.15, "detecting beats")
     print("\n[2/4] Detecting beats …")
-    beat_times, detected_bpm, downbeat_indices, detected_meter = detect_beats(y, sr)
+    bpb_options = [int(x) for x in args.madmom_bpb_options.split(",") if x.strip()]
+    beat_times, detected_bpm, downbeat_indices, detected_meter = detect_beats(
+        y, sr,
+        bpb_options=bpb_options,
+        backend=args.detector_backend,
+        madmom_fps=args.madmom_fps,
+        madmom_timeout_s=args.madmom_timeout_s,
+        librosa_start_bpm=args.librosa_start_bpm,
+        librosa_tightness=args.librosa_tightness,
+        librosa_hop_length=args.librosa_hop_length,
+    )
     _emit("detect_beats", 0.55, f"{len(beat_times)} beats")
 
     if args.detect_only:
@@ -626,7 +728,13 @@ def main() -> None:
     # bump, etc.) that the single-BPM warp would corrupt. AI-floating-BPM
     # jitter and human rubato are explicitly *not* flagged — that's what
     # the warp is for. See detect_tempo_change() docstring.
-    tempo_event = detect_tempo_change(beat_times, downbeat_indices)
+    tempo_event = detect_tempo_change(
+        beat_times, downbeat_indices,
+        window_bars=args.tempo_change_window_bars,
+        persist_bars=args.tempo_change_persist_bars,
+        threshold_pct=args.tempo_change_threshold_pct,
+        threshold_floor_bpm=args.tempo_change_threshold_floor,
+    )
     if tempo_event is not None:
         if args.allow_tempo_change:
             print(f"\n  ⚠  Tempo change detected at bar {tempo_event['at_bar']} "
@@ -681,7 +789,11 @@ def main() -> None:
 
     _emit("warp", 0.60, "warping")
     print(f"\n[4/4] Stabilising (strength={args.strength}) …")
-    y_out = stabilize(y, sr, beat_times, warp_bpm, strength=args.strength)
+    y_out = stabilize(
+        y, sr, beat_times, warp_bpm,
+        strength=args.strength,
+        crispness=args.pyrb_crispness,
+    )
     _emit("warp", 0.90, "warped")
 
     # ── Intro trim ────────────────────────────────────────────────────────────
@@ -691,13 +803,15 @@ def main() -> None:
     # thinning) so the bar length is musically consistent.
     if args.trim_intro:
         bar_duration   = args.beats_per_bar * 60.0 / target_bpm
+        intro_duration = max(0, int(args.intro_trim_bars)) * bar_duration
         first_beat_t   = float(beat_times[0])
-        trim_start_t   = first_beat_t - bar_duration
+        trim_start_t   = first_beat_t - intro_duration
 
         print(f"\n  Intro trim:")
         print(f"    First beat     : {first_beat_t:.3f}s")
         print(f"    Bar duration   : {bar_duration:.3f}s  "
               f"({args.beats_per_bar} beats @ {target_bpm} BPM)")
+        print(f"    Intro duration : {intro_duration:.3f}s  ({args.intro_trim_bars} bars)")
         print(f"    Target start   : {trim_start_t:.3f}s", end="")
 
         if trim_start_t >= 0:

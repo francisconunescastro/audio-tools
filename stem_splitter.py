@@ -78,11 +78,16 @@ PRESENCE_WIN_S = 1.0  # window length in seconds (RMS measured per window)
 PRESENCE_RUN_S = 2.0  # minimum consecutive seconds above threshold
 
 
-def detect_stem_presence(wav_path: str) -> dict:
+def detect_stem_presence(
+    wav_path: str,
+    presence_db: float = PRESENCE_DB,
+    window_s: float = PRESENCE_WIN_S,
+    run_s: float = PRESENCE_RUN_S,
+) -> dict:
     """
     Return {"present": bool, "rms_dbfs_peak": float, "loud_seconds": float}
-    for one stem WAV. `present` is True if at least PRESENCE_RUN_S of
-    consecutive 1-second windows clear PRESENCE_DB.
+    for one stem WAV. `present` is True if at least `run_s` seconds of
+    consecutive `window_s`-length windows clear `presence_db` dBFS.
     """
     import numpy as np
 
@@ -108,7 +113,7 @@ def detect_stem_presence(wav_path: str) -> dict:
             return {"present": True, "rms_dbfs_peak": 0.0, "loud_seconds": 0.0,
                     "error": f"could not load wav: {e}"}
 
-    win = max(1, int(round(PRESENCE_WIN_S * sr)))
+    win = max(1, int(round(window_s * sr)))
     n_full = (len(y) // win) * win
     if n_full == 0:
         return {"present": False, "rms_dbfs_peak": -120.0, "loud_seconds": 0.0}
@@ -119,7 +124,7 @@ def detect_stem_presence(wav_path: str) -> dict:
     rms_db = 20.0 * np.log10(rms)
     peak_db = float(rms_db.max())
 
-    above = rms_db >= PRESENCE_DB
+    above = rms_db >= presence_db
     # Longest run of consecutive "above" windows
     longest = 0
     current = 0
@@ -129,8 +134,8 @@ def detect_stem_presence(wav_path: str) -> dict:
             longest = max(longest, current)
         else:
             current = 0
-    loud_seconds = float(longest * PRESENCE_WIN_S)
-    present = loud_seconds >= PRESENCE_RUN_S
+    loud_seconds = float(longest * window_s)
+    present = loud_seconds >= run_s
     return {
         "present":      bool(present),
         "rms_dbfs_peak": round(peak_db, 2),
@@ -138,7 +143,22 @@ def detect_stem_presence(wav_path: str) -> dict:
     }
 
 
-def split(input_path: str, output_dir: str, model: str, wanted_stems: set[str] | None) -> list[str]:
+def split(
+    input_path: str,
+    output_dir: str,
+    model: str,
+    wanted_stems: set[str] | None,
+    demucs_shifts: int = 1,
+    demucs_overlap: float = 0.25,
+    demucs_jobs: int = 0,
+    demucs_segment: int = 0,
+    demucs_device: str = "auto",
+    demucs_int24: bool = False,
+    demucs_mp3: bool = False,
+    presence_db: float = PRESENCE_DB,
+    presence_window_s: float = PRESENCE_WIN_S,
+    presence_run_s: float = PRESENCE_RUN_S,
+) -> list[str]:
     """
     Run Demucs separation and return list of output file paths.
     Files are moved out of Demucs's nested folder structure into output_dir directly.
@@ -150,8 +170,24 @@ def split(input_path: str, output_dir: str, model: str, wanted_stems: set[str] |
             sys.executable, "-m", "demucs",
             "-n", model,
             "-o", tmp,
-            input_path,
         ]
+        # Demucs CLI pass-through. Only push non-default values so the command
+        # line stays readable in the logs.
+        if demucs_shifts and demucs_shifts != 1:
+            cmd += ["--shifts", str(int(demucs_shifts))]
+        if demucs_overlap and demucs_overlap != 0.25:
+            cmd += ["--overlap", str(float(demucs_overlap))]
+        if demucs_jobs and demucs_jobs > 0:
+            cmd += ["--jobs", str(int(demucs_jobs))]
+        if demucs_segment and demucs_segment > 0:
+            cmd += ["--segment", str(int(demucs_segment))]
+        if demucs_device and demucs_device != "auto":
+            cmd += ["-d", demucs_device]
+        if demucs_int24:
+            cmd += ["--int24"]
+        if demucs_mp3:
+            cmd += ["--mp3"]
+        cmd += [input_path]
         print(f"  Model : {model}")
         print(f"  Loading model … (first run downloads weights, subsequent runs are instant)")
         _emit("demucs", 0.02, "starting demucs")
@@ -207,14 +243,20 @@ def split(input_path: str, output_dir: str, model: str, wanted_stems: set[str] |
 
         written = []
         presence: dict[str, dict] = {}
-        for stem_file in sorted(stems_dir.glob("*.wav")):
+        stem_files = sorted(stems_dir.glob("*.wav")) or sorted(stems_dir.glob("*.mp3"))
+        for stem_file in stem_files:
             stem_name = stem_file.stem
             if wanted_stems and stem_name.lower() not in wanted_stems:
                 continue
             dest = os.path.join(output_dir, f"{stem_name}.wav")
             shutil.move(str(stem_file), dest)
             size_mb = os.path.getsize(dest) / 1_000_000
-            info = detect_stem_presence(dest)
+            info = detect_stem_presence(
+                dest,
+                presence_db=presence_db,
+                window_s=presence_window_s,
+                run_s=presence_run_s,
+            )
             flag = "" if info["present"] else "  ⚠ low energy"
             print(f"  ✓  {stem_name:<10}  →  {dest}  ({size_mb:.1f} MB, "
                   f"peak {info['rms_dbfs_peak']:>5.1f} dBFS, "
@@ -235,6 +277,8 @@ def mix_backing_track(
     stems_dir: str,
     exclude_stem: str,
     output_path: str,
+    peak_dbfs: float = -1.0,
+    bit_depth: int = 24,
 ) -> str | None:
     """
     Mix all WAV stems in stems_dir (except exclude_stem) into a single WAV.
@@ -249,7 +293,7 @@ def mix_backing_track(
     exclude = exclude_stem.strip().lower()
 
     for fname in sorted(os.listdir(stems_dir)):
-        if not fname.endswith(".wav"):
+        if not (fname.endswith(".wav") or fname.endswith(".mp3")):
             continue
         stem_name = os.path.splitext(fname)[0].lower()
         if stem_name == exclude:
@@ -296,10 +340,11 @@ def mix_backing_track(
     if mixed is None or not included:
         return None
 
-    # Peak-normalise to −1 dBFS to prevent clipping
+    # Peak-normalise to the requested ceiling (default −1 dBFS) to prevent clipping.
+    peak_linear = 10.0 ** (peak_dbfs / 20.0)
     peak = float(np.abs(mixed).max())
-    if peak > 0.891:
-        mixed = mixed * (0.891 / peak)
+    if peak > peak_linear:
+        mixed = mixed * (peak_linear / peak)
 
     # Save via torchaudio (always available in venv_demucs).
     # Demucs itself writes its stems this way; the TorchCodec deprecation
@@ -310,10 +355,10 @@ def mix_backing_track(
     try:
         torchaudio.save(
             output_path, out_tensor, sample_rate=sr,
-            bits_per_sample=24, encoding="PCM_S",
+            bits_per_sample=int(bit_depth), encoding="PCM_S",
         )
     except Exception:
-        # Fallback: let torchaudio pick defaults (16-bit) if the codec rejects 24-bit
+        # Fallback: let torchaudio pick defaults (16-bit) if the codec rejects this depth
         torchaudio.save(output_path, out_tensor, sample_rate=sr)
     print(f"  ✓  Backing track  →  {output_path}")
     print(f"         Mixed      : {', '.join(included)}")
@@ -348,6 +393,40 @@ Examples:
                    help="Session instrument to exclude from the backing track (e.g. 'bass')")
     p.add_argument("--backing-track-out", default=None, dest="backing_track_out",
                    help="Output path for the backing track WAV")
+    # Demucs CLI pass-through
+    dem = p.add_argument_group("Demucs (library knobs)")
+    dem.add_argument("--demucs-shifts",  type=int,   default=1,    dest="demucs_shifts",
+                     help="Number of random shifts for equivariant stabilisation. Higher = "
+                          "better separation but proportionally slower (default: 1)")
+    dem.add_argument("--demucs-overlap", type=float, default=0.25, dest="demucs_overlap",
+                     help="Overlap between processing chunks, 0.0–0.99 (default: 0.25)")
+    dem.add_argument("--demucs-jobs",    type=int,   default=0,    dest="demucs_jobs",
+                     help="Parallel worker jobs. 0 = let demucs decide (default: 0)")
+    dem.add_argument("--demucs-segment", type=int,   default=0,    dest="demucs_segment",
+                     help="Segment length in seconds. 0 = full file (default: 0)")
+    dem.add_argument("--demucs-device",  default="auto", dest="demucs_device",
+                     choices=("auto", "cpu", "cuda", "mps"),
+                     help="Inference device (default: auto)")
+    dem.add_argument("--demucs-int24",   action="store_true", dest="demucs_int24",
+                     help="Save stems as 24-bit WAV instead of 16-bit")
+    dem.add_argument("--demucs-mp3",     action="store_true", dest="demucs_mp3",
+                     help="Save stems as MP3 instead of WAV")
+    # Stem presence detector knobs
+    pres = p.add_argument_group("Stem presence detector")
+    pres.add_argument("--presence-db",        type=float, default=PRESENCE_DB,     dest="presence_db",
+                      help=f"dBFS threshold for a 'loud' window (default: {PRESENCE_DB})")
+    pres.add_argument("--presence-window-s",  type=float, default=PRESENCE_WIN_S,  dest="presence_window_s",
+                      help=f"RMS window length in seconds (default: {PRESENCE_WIN_S})")
+    pres.add_argument("--presence-run-s",     type=float, default=PRESENCE_RUN_S,  dest="presence_run_s",
+                      help=f"Consecutive loud seconds needed to mark a stem 'present' "
+                           f"(default: {PRESENCE_RUN_S})")
+    # Backing-track mixer knobs
+    bt = p.add_argument_group("Backing track")
+    bt.add_argument("--backing-peak-dbfs",  type=float, default=-1.0, dest="backing_peak_dbfs",
+                    help="Peak ceiling for the mixed backing track in dBFS (default: -1)")
+    bt.add_argument("--backing-bit-depth",  type=int,   default=24,   dest="backing_bit_depth",
+                    choices=(16, 24, 32),
+                    help="Backing track WAV bit depth (default: 24)")
     return p.parse_args()
 
 
@@ -374,12 +453,28 @@ def main() -> None:
         print(f"  Stems  : {', '.join(sorted(wanted))}")
     print()
 
-    files = split(args.input, output_dir, args.model, wanted)
+    files = split(
+        args.input, output_dir, args.model, wanted,
+        demucs_shifts=args.demucs_shifts,
+        demucs_overlap=args.demucs_overlap,
+        demucs_jobs=args.demucs_jobs,
+        demucs_segment=args.demucs_segment,
+        demucs_device=args.demucs_device,
+        demucs_int24=args.demucs_int24,
+        demucs_mp3=args.demucs_mp3,
+        presence_db=args.presence_db,
+        presence_window_s=args.presence_window_s,
+        presence_run_s=args.presence_run_s,
+    )
     _emit("demucs", 1.0, "done")
 
     if args.session_type and args.backing_track_out:
         _emit("backing_track", 0.99, "mixing backing track")
-        mix_backing_track(output_dir, args.session_type, args.backing_track_out)
+        mix_backing_track(
+            output_dir, args.session_type, args.backing_track_out,
+            peak_dbfs=args.backing_peak_dbfs,
+            bit_depth=args.backing_bit_depth,
+        )
 
     print(f"\nDone — {len(files)} stem(s) written to {output_dir}/")
 

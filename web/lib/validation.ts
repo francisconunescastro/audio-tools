@@ -64,6 +64,44 @@ export const SettingsSchema = z.object({
   stems: z.array(z.enum(stemOptions)).optional(),
   stemModel: z.enum(["htdemucs_6s", "htdemucs", "htdemucs_ft", "mdx_extra"]).optional(),
   sessionType: z.enum(["vocals", "guitar", "bass", "piano", "other"]).optional(),
+
+  // ── Beat-detector library knobs ──
+  detectorBackend:  z.enum(["auto", "madmom", "librosa"]).optional(),
+  madmomBpbOptions: z.string().regex(/^\d+(,\d+)*$/).max(40).optional(),
+  madmomFps:        z.number().int().min(20).max(1000).optional(),
+  madmomTimeoutS:   z.number().int().min(10).max(3600).optional(),
+  librosaStartBpm:  z.number().min(20).max(400).optional(),
+  librosaTightness: z.number().min(1).max(1000).optional(),
+  librosaHopLength: z.number().int().min(64).max(8192).optional(),
+  tsWindowFactor:   z.number().min(0.01).max(1.0).optional(),
+
+  // ── Beat-stabilizer library knobs ──
+  introTrimBars:                z.number().int().min(0).max(16).optional(),
+  tempoChangeWindowBars:        z.number().int().min(2).max(64).optional(),
+  tempoChangePersistBars:       z.number().int().min(1).max(32).optional(),
+  tempoChangeThresholdPct:      z.number().min(0).max(1).optional(),
+  tempoChangeThresholdFloor:    z.number().min(0).max(100).optional(),
+  pyrbCrispness:                z.number().int().min(0).max(6).optional(),
+
+  // ── Chord-detection library knobs ──
+  barPhase:           z.boolean().optional(),
+  msafBoundariesId:   z.enum(["sf", "foote", "cnmf", "scluster", "vmo", "olda"]).optional(),
+  msafLabelsId:       z.enum(["fmc2d", "cnmf", "scluster"]).optional(),
+  confidenceWarn:     z.number().min(0).max(1).optional(),
+
+  // ── Stem-splitting library knobs ──
+  demucsShifts:      z.number().int().min(1).max(10).optional(),
+  demucsOverlap:     z.number().min(0).max(0.99).optional(),
+  demucsJobs:        z.number().int().min(0).max(64).optional(),
+  demucsSegment:     z.number().int().min(0).max(600).optional(),
+  demucsDevice:      z.enum(["auto", "cpu", "cuda", "mps"]).optional(),
+  demucsInt24:       z.boolean().optional(),
+  demucsMp3:         z.boolean().optional(),
+  presenceDb:        z.number().min(-120).max(0).optional(),
+  presenceWindowS:   z.number().min(0.05).max(10).optional(),
+  presenceRunS:      z.number().min(0.05).max(60).optional(),
+  backingPeakDbfs:   z.number().min(-30).max(0).optional(),
+  backingBitDepth:   z.union([z.literal(16), z.literal(24), z.literal(32)]).optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

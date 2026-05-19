@@ -702,6 +702,8 @@ def key_override_to_display(key_str: str) -> str:
 def detect_sections(
     audio_path: str,
     bar_chords: list[dict],
+    boundaries_id: str = "sf",
+    labels_id: str = "fmc2d",
 ) -> list[dict]:
     """
     Run MSAF on `audio_path` and return a list of section descriptors
@@ -742,7 +744,7 @@ def detect_sections(
             staged = os.path.join(audio_dir, os.path.basename(audio_path))
             os.symlink(os.path.abspath(audio_path), staged)
             boundaries, raw_labels = msaf.process(
-                staged, boundaries_id="sf", labels_id="fmc2d",
+                staged, boundaries_id=boundaries_id, labels_id=labels_id,
             )
     except Exception as e:
         print(f"  [sections] msaf.process failed: {e}")
@@ -915,26 +917,26 @@ def bar_chords_to_musicxml(
         measure = stream.Measure(number=bar["bar"])
         if bar["bar"] in section_marks:
             measure.insert(0.0, expressions.RehearsalMark(section_marks[bar["bar"]]))
+        # Chord symbols at their segment offsets. ChordSymbol renders as a
+        # text above the staff (MusicXML <harmony>), so it coexists with the
+        # rhythm-slash notes below.
         offset = 0.0
         for seg in bar["segments"]:
             figure = _crema_to_m21_figure(seg["chord"], use_sharps)
-            if figure is None:
-                # No chord — insert a rest of the same duration so the measure
-                # accounts for the time correctly.
-                r = note.Rest()
-                r.duration.quarterLength = seg["beats"] * beat_ql
-                measure.insert(offset, r)
-            else:
+            if figure is not None:
                 cs = harmony.ChordSymbol(figure)
                 cs.duration.quarterLength = seg["beats"] * beat_ql
                 measure.insert(offset, cs)
             offset += seg["beats"] * beat_ql
-        # Pad the measure if the segments don't fill it (defensive — they
-        # should already sum to beats_per_bar).
-        if offset < bar_ql:
-            r = note.Rest()
-            r.duration.quarterLength = bar_ql - offset
-            measure.insert(offset, r)
+        # Fill the bar with one rhythm slash per grid beat. The pitch is
+        # cosmetic — MuseScore/Sibelius position slash noteheads on the
+        # middle line regardless.
+        for b in range(beats_per_bar):
+            slash = note.Note("B4")
+            slash.notehead = "slash"
+            slash.noteheadFill = True
+            slash.duration.quarterLength = beat_ql
+            measure.insert(b * beat_ql, slash)
         part.append(measure)
 
     score.append(part)
@@ -959,24 +961,28 @@ def generate_lilypond(
 ) -> str:
     # time_sig_str overrides the default "{beats_per_bar}/4" — used for 6/8.
     ts = time_sig_str or f"{beats_per_bar}/4"
-    bar_spacer = {2: "s2", 3: "s2.", 4: "s1", 6: "s2."}.get(beats_per_bar, "s1")
+    # Per-beat rhythm slash. In 6/8 each grid step is an eighth so the bar
+    # fills correctly; everything else is quartered. `c'` is squashed to the
+    # middle line by Pitch_squash_engraver below, so the pitch is cosmetic.
+    beat_duration = "8" if beats_per_bar == 6 else "4"
+    bar_slashes = " ".join(f"c'{beat_duration}" for _ in range(beats_per_bar))
 
     # Map bar number (1-indexed) → section letter for the bar that opens each section.
-    # `\mark` belongs to the staff context, so we attach the rehearsal mark to
-    # the matching spacer line. Marks render above the staff with a default box.
+    # `\mark` belongs to the Score context, so we attach the rehearsal mark to
+    # the matching bar's slash line. Marks render above the staff with a default box.
     section_marks: dict[int, str] = {s["start_bar"]: s["label"] for s in (sections or [])}
 
-    chord_lines, spacer_lines = [], []
+    chord_lines, slash_lines = [], []
     for i, bar in enumerate(bar_chords):
         tokens = [_ly_chord_token(seg["chord"], seg["beats"], use_sharps) for seg in bar["segments"]]
         chord_lines.append(" ".join(tokens))
-        spacer = bar_spacer
+        slashes = bar_slashes
         if bar["bar"] in section_marks:
             label = section_marks[bar["bar"]]
-            spacer = f'\\mark \\markup {{ \\box "{label}" }} {bar_spacer}'
-        spacer_lines.append(spacer)
+            slashes = f'\\mark \\markup {{ \\box "{label}" }} {bar_slashes}'
+        slash_lines.append(slashes)
         if (i + 1) % bars_per_line == 0 and i < len(bar_chords) - 1:
-            spacer_lines.append("\\break")
+            slash_lines.append("\\break")
 
     # LilyPond strings need backslashes and double-quotes escaped so that
     # titles containing punctuation don't blow up the parser.
@@ -1006,7 +1012,7 @@ def generate_lilypond(
     )
 
     chord_body  = " |\n    ".join(chord_lines)
-    spacer_body = "\n      ".join(spacer_lines)
+    slash_body  = " |\n        ".join(slash_lines)
 
     return f"""\
 \\version "2.26.0"
@@ -1054,9 +1060,12 @@ theChords = \\chordmode {{
     \\new Staff {{
       {key_stmt}
       \\time {ts}
-      \\override Staff.Clef.stencil = ##f
-      \\override Staff.TimeSignature.stencil = ##f
-      {spacer_body}
+      \\new Voice \\with {{
+        \\consists "Pitch_squash_engraver"
+      }} {{
+        \\improvisationOn
+        {slash_body}
+      }}
     }}
   >>
   \\layout {{
@@ -1139,6 +1148,25 @@ Examples:
                    help="Skip MSAF structural segmentation. The PDF and MusicXML "
                         "will have no rehearsal marks. Use this if MSAF segments "
                         "incorrectly or you don't care about section labels.")
+    # Library knobs
+    lib = p.add_argument_group("Library knobs")
+    lib.add_argument("--no-bar-phase",     action="store_false", dest="bar_phase",
+                     help="Disable chord-grid phase alignment to bar downbeats")
+    lib.set_defaults(bar_phase=True)
+    lib.add_argument("--msaf-boundaries-id", default="sf", dest="msaf_boundaries_id",
+                     help="MSAF boundary algorithm: sf, foote, cnmf, scluster, vmo, olda "
+                          "(default: sf)")
+    lib.add_argument("--msaf-labels-id",     default="fmc2d", dest="msaf_labels_id",
+                     help="MSAF labels algorithm: fmc2d, cnmf, scluster (default: fmc2d)")
+    lib.add_argument("--ts-window-factor",   type=float, default=0.15, dest="ts_window_factor",
+                     help="Time-signature autocorrelation window factor (default: 0.15)")
+    lib.add_argument("--librosa-start-bpm",  type=float, default=120.0, dest="librosa_start_bpm",
+                     help="Initial tempo guess for librosa beat tracker (default: 120)")
+    lib.add_argument("--librosa-tightness",  type=float, default=100.0, dest="librosa_tightness",
+                     help="librosa beat-tracker onset-strength weighting (default: 100)")
+    lib.add_argument("--librosa-hop-length", type=int,   default=512,   dest="librosa_hop_length",
+                     help="librosa STFT hop length in samples (default: 512)")
+
     p.add_argument("--progress-json",     action="store_true", dest="progress_json",
                    help="Emit machine-readable PROGRESS JSON lines on stdout")
     return p.parse_args()
@@ -1197,7 +1225,12 @@ def main() -> None:
     # 3. Detect beats — prefer explicit flag, then sidecar, then auto
     _emit("beats", 0.50, "beat detection")
     print("\n[3/5] Detecting beats …")
-    beat_times = detect_beats(y, sr)
+    beat_times = detect_beats(
+        y, sr,
+        start_bpm=args.librosa_start_bpm,
+        tightness=args.librosa_tightness,
+        hop_length=args.librosa_hop_length,
+    )
     _emit("beats", 0.60, f"{len(beat_times)} beats")
     sidecar_bpm = read_bpm_sidecar(args.input) if args.bpm is None else None
     detected_bpm = 60.0 / float(np.median(np.diff(beat_times)))
@@ -1227,7 +1260,7 @@ def main() -> None:
         beats_per_bar = args.time_sig
         _ts_source = "manual"
     else:
-        beats_per_bar = detect_time_signature(y, sr, beat_times)
+        beats_per_bar = detect_time_signature(y, sr, beat_times, window_factor=args.ts_window_factor)
         _ts_source = "auto-detected"
 
     # detect_time_signature returns 6 to signal compound duple (6/8).
@@ -1248,11 +1281,12 @@ def main() -> None:
     beat_chords = [{**b, "chord": simplify_chord(b["chord"], add_7th=args.add_7th)}
                    for b in beat_chords]
 
-    # Align the beat grid to real bar downbeats
-    bar_phase = find_bar_phase(beat_chords, beats_per_bar)
-    if bar_phase > 0:
-        print(f"  Bar phase: offset {bar_phase} beat(s) to align chord changes to bar boundaries")
-        beat_chords = beat_chords[bar_phase:]
+    # Align the beat grid to real bar downbeats (skip with --no-bar-phase).
+    if args.bar_phase:
+        bar_phase = find_bar_phase(beat_chords, beats_per_bar)
+        if bar_phase > 0:
+            print(f"  Bar phase: offset {bar_phase} beat(s) to align chord changes to bar boundaries")
+            beat_chords = beat_chords[bar_phase:]
 
     bar_chords = hybrid_bar_chords(beat_chords, beats_per_bar, args.mid_bar_threshold)
 
@@ -1323,7 +1357,11 @@ def main() -> None:
     if not args.skip_sections:
         _emit("sections", 0.85, "detecting sections")
         print("\n  Detecting sections (MSAF) …")
-        sections = detect_sections(args.input, bar_chords)
+        sections = detect_sections(
+            args.input, bar_chords,
+            boundaries_id=args.msaf_boundaries_id,
+            labels_id=args.msaf_labels_id,
+        )
         if sections:
             print(f"  → {len(sections)} section(s): " + ", ".join(
                 f"{s['label']}(bars {s['start_bar']}-{s['end_bar']})" for s in sections

@@ -172,19 +172,34 @@ def beat_sync_chords(
 # Detect beats (lifted from beat_stabilizer logic)
 # ---------------------------------------------------------------------------
 
-def detect_beats(y: np.ndarray, sr: int, manual_bpm: float | None = None) -> np.ndarray:
+def detect_beats(
+    y: np.ndarray,
+    sr: int,
+    manual_bpm: float | None = None,
+    start_bpm: float = 120.0,
+    tightness: float = 100.0,
+    hop_length: int = 512,
+) -> np.ndarray:
     import librosa
 
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+    tempo, beat_frames = librosa.beat.beat_track(
+        y=y, sr=sr, units="frames",
+        start_bpm=start_bpm, tightness=tightness, hop_length=hop_length,
+    )
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
 
     if len(beat_times) < 2:
-        beat_times = librosa.onset.onset_detect(y=y, sr=sr, units="time")
+        beat_times = librosa.onset.onset_detect(y=y, sr=sr, units="time", hop_length=hop_length)
 
     return beat_times.astype(float)
 
 
-def detect_time_signature(y: np.ndarray, sr: int, beat_times: np.ndarray) -> int:
+def detect_time_signature(
+    y: np.ndarray,
+    sr: int,
+    beat_times: np.ndarray,
+    window_factor: float = 0.15,
+) -> int:
     """
     Estimate beats-per-bar (2, 3, or 4) by scoring how well the onset strength
     envelope repeats at each candidate bar length via autocorrelation.
@@ -207,7 +222,7 @@ def detect_time_signature(y: np.ndarray, sr: int, beat_times: np.ndarray) -> int
         lag = int(round(avg_beat_frames * bpb))
         if lag < len(ac):
             # Average the autocorrelation over a small window around the lag
-            window = max(1, int(avg_beat_frames * 0.15))
+            window = max(1, int(avg_beat_frames * window_factor))
             scores[bpb] = float(ac[max(0, lag - window): lag + window + 1].mean())
 
     best = max(scores, key=scores.get)
@@ -225,7 +240,7 @@ def detect_time_signature(y: np.ndarray, sr: int, beat_times: np.ndarray) -> int
     if best == 3:
         half_lag = int(round(avg_beat_frames * 1.5))
         if half_lag < len(ac):
-            window = max(1, int(avg_beat_frames * 0.15))
+            window = max(1, int(avg_beat_frames * window_factor))
             half_score = float(
                 ac[max(0, half_lag - window): half_lag + window + 1].mean()
             )
@@ -343,6 +358,16 @@ Examples:
     p.add_argument("--format", choices=["full", "compact"], default="full",
                    help="Output format: full (every beat) or compact (bar-by-bar, default: full)")
     p.add_argument("--sample-rate", type=int, default=44100)
+    # Library knobs (rarely changed)
+    p.add_argument("--ts-window-factor", type=float, default=0.15, dest="ts_window_factor",
+                   help="Time-signature autocorrelation window as a fraction of the median "
+                        "beat-interval (default: 0.15)")
+    p.add_argument("--librosa-start-bpm", type=float, default=120.0, dest="librosa_start_bpm",
+                   help="Initial tempo guess for librosa.beat.beat_track (default: 120)")
+    p.add_argument("--librosa-tightness", type=float, default=100.0, dest="librosa_tightness",
+                   help="librosa beat-tracker onset-strength weighting (default: 100)")
+    p.add_argument("--librosa-hop-length", type=int, default=512, dest="librosa_hop_length",
+                   help="librosa STFT hop length in samples (default: 512)")
     return p.parse_args()
 
 
@@ -370,7 +395,12 @@ def main() -> None:
 
     # 3. Detect beats
     print("\n[3/4] Detecting beats …")
-    beat_times = detect_beats(y, sr, args.bpm)
+    beat_times = detect_beats(
+        y, sr, args.bpm,
+        start_bpm=args.librosa_start_bpm,
+        tightness=args.librosa_tightness,
+        hop_length=args.librosa_hop_length,
+    )
     interval   = np.median(np.diff(beat_times))
     bpm        = 60.0 / interval
     if args.bpm:

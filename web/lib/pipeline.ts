@@ -137,6 +137,44 @@ function settingsToArgs(s: Settings, outDir: string, inputPath: string): string[
   if (s.stemModel && s.stemModel !== "htdemucs_6s") args.push("--stem-model", s.stemModel);
   if (s.sessionType && !s.skipStems) args.push("--session-type", s.sessionType);
 
+  // ── Beat-detector library knobs ──
+  if (s.detectorBackend && s.detectorBackend !== "auto") args.push("--detector-backend", s.detectorBackend);
+  if (s.madmomBpbOptions && s.madmomBpbOptions !== "3,4") args.push("--madmom-bpb-options", s.madmomBpbOptions);
+  if (s.madmomFps !== undefined && s.madmomFps !== 100) args.push("--madmom-fps", String(s.madmomFps));
+  if (s.madmomTimeoutS !== undefined && s.madmomTimeoutS !== 240) args.push("--madmom-timeout-s", String(s.madmomTimeoutS));
+  if (s.librosaStartBpm !== undefined && s.librosaStartBpm !== 120) args.push("--librosa-start-bpm", String(s.librosaStartBpm));
+  if (s.librosaTightness !== undefined && s.librosaTightness !== 100) args.push("--librosa-tightness", String(s.librosaTightness));
+  if (s.librosaHopLength !== undefined && s.librosaHopLength !== 512) args.push("--librosa-hop-length", String(s.librosaHopLength));
+  if (s.tsWindowFactor !== undefined && s.tsWindowFactor !== 0.15) args.push("--ts-window-factor", String(s.tsWindowFactor));
+
+  // ── Beat-stabilizer library knobs ──
+  if (s.introTrimBars !== undefined && s.introTrimBars !== 1) args.push("--intro-trim-bars", String(s.introTrimBars));
+  if (s.tempoChangeWindowBars !== undefined && s.tempoChangeWindowBars !== 8) args.push("--tempo-change-window-bars", String(s.tempoChangeWindowBars));
+  if (s.tempoChangePersistBars !== undefined && s.tempoChangePersistBars !== 4) args.push("--tempo-change-persist-bars", String(s.tempoChangePersistBars));
+  if (s.tempoChangeThresholdPct !== undefined && s.tempoChangeThresholdPct !== 0.06) args.push("--tempo-change-threshold-pct", String(s.tempoChangeThresholdPct));
+  if (s.tempoChangeThresholdFloor !== undefined && s.tempoChangeThresholdFloor !== 6) args.push("--tempo-change-threshold-floor", String(s.tempoChangeThresholdFloor));
+  if (s.pyrbCrispness !== undefined) args.push("--pyrb-crispness", String(s.pyrbCrispness));
+
+  // ── Chord-detection library knobs ──
+  if (s.barPhase === false) args.push("--no-bar-phase");
+  if (s.msafBoundariesId && s.msafBoundariesId !== "sf") args.push("--msaf-boundaries-id", s.msafBoundariesId);
+  if (s.msafLabelsId && s.msafLabelsId !== "fmc2d") args.push("--msaf-labels-id", s.msafLabelsId);
+  if (s.confidenceWarn !== undefined && s.confidenceWarn !== 0.45) args.push("--confidence-warn", String(s.confidenceWarn));
+
+  // ── Stem-splitting library knobs ──
+  if (s.demucsShifts !== undefined && s.demucsShifts !== 1) args.push("--demucs-shifts", String(s.demucsShifts));
+  if (s.demucsOverlap !== undefined && s.demucsOverlap !== 0.25) args.push("--demucs-overlap", String(s.demucsOverlap));
+  if (s.demucsJobs !== undefined && s.demucsJobs > 0) args.push("--demucs-jobs", String(s.demucsJobs));
+  if (s.demucsSegment !== undefined && s.demucsSegment > 0) args.push("--demucs-segment", String(s.demucsSegment));
+  if (s.demucsDevice && s.demucsDevice !== "auto") args.push("--demucs-device", s.demucsDevice);
+  if (s.demucsInt24) args.push("--demucs-int24");
+  if (s.demucsMp3) args.push("--demucs-mp3");
+  if (s.presenceDb !== undefined && s.presenceDb !== -30) args.push("--presence-db", String(s.presenceDb));
+  if (s.presenceWindowS !== undefined && s.presenceWindowS !== 1.0) args.push("--presence-window-s", String(s.presenceWindowS));
+  if (s.presenceRunS !== undefined && s.presenceRunS !== 2.0) args.push("--presence-run-s", String(s.presenceRunS));
+  if (s.backingPeakDbfs !== undefined && s.backingPeakDbfs !== -1) args.push("--backing-peak-dbfs", String(s.backingPeakDbfs));
+  if (s.backingBitDepth !== undefined && s.backingBitDepth !== 24) args.push("--backing-bit-depth", String(s.backingBitDepth));
+
   return args;
 }
 

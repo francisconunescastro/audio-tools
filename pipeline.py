@@ -109,6 +109,51 @@ Examples:
     chart.add_argument("--compound",           action="store_true", dest="compound",
                        help="Force 6/8 notation when beats-per-bar is 3 (auto-detected for most 6/8 songs).")
 
+    # ── Beat detector library knobs (relayed to beat_stabilizer + chord_chart_render) ──
+    det = p.add_argument_group("Beat detector (library knobs)")
+    det.add_argument("--detector-backend", default="auto",
+                     choices=("auto", "madmom", "librosa"), dest="detector_backend",
+                     help="Beat detector backend (default: auto)")
+    det.add_argument("--madmom-bpb-options", default="3,4", dest="madmom_bpb_options",
+                     help="Candidate beats-per-bar for madmom downbeats (default: 3,4)")
+    det.add_argument("--madmom-fps",         type=int,   default=100, dest="madmom_fps",
+                     help="madmom RNN/DBN frame rate Hz (default: 100)")
+    det.add_argument("--madmom-timeout-s",   type=int,   default=240, dest="madmom_timeout_s",
+                     help="Madmom subprocess timeout in seconds (default: 240)")
+    det.add_argument("--librosa-start-bpm",  type=float, default=120.0, dest="librosa_start_bpm",
+                     help="librosa beat-tracker initial tempo guess (default: 120)")
+    det.add_argument("--librosa-tightness",  type=float, default=100.0, dest="librosa_tightness",
+                     help="librosa beat-tracker tightness (default: 100)")
+    det.add_argument("--librosa-hop-length", type=int,   default=512,   dest="librosa_hop_length",
+                     help="librosa STFT hop length in samples (default: 512)")
+    det.add_argument("--ts-window-factor",   type=float, default=0.15,  dest="ts_window_factor",
+                     help="Time-signature autocorrelation window factor (default: 0.15)")
+    # ── Beat-stabilizer extra knobs ──
+    bs = p.add_argument_group("Beat stabilizer (library knobs)")
+    bs.add_argument("--intro-trim-bars",            type=int,   default=1,    dest="intro_trim_bars",
+                    help="Bars before the first beat retained when trimming (default: 1)")
+    bs.add_argument("--tempo-change-window-bars",   type=int,   default=8,    dest="tempo_change_window_bars",
+                    help="Tempo-change scanner rolling-median window (default: 8 bars)")
+    bs.add_argument("--tempo-change-persist-bars",  type=int,   default=4,    dest="tempo_change_persist_bars",
+                    help="Bars new tempo must persist before firing the guard (default: 4)")
+    bs.add_argument("--tempo-change-threshold-pct", type=float, default=0.06, dest="tempo_change_threshold_pct",
+                    help="Percentage tempo step counting as a change (default: 0.06)")
+    bs.add_argument("--tempo-change-threshold-floor", type=float, default=6.0, dest="tempo_change_threshold_floor",
+                    help="Minimum absolute BPM step counting as a change (default: 6)")
+    bs.add_argument("--pyrb-crispness",             type=int,   default=None, dest="pyrb_crispness",
+                    help="rubberband --crispness 0–6 (default: library default)")
+    # ── Chord-detection extra knobs ──
+    cd = p.add_argument_group("Chord detection (library knobs)")
+    cd.add_argument("--no-bar-phase",        action="store_false", dest="bar_phase",
+                    help="Disable chord-grid phase alignment to bar downbeats")
+    p.set_defaults(bar_phase=True)
+    cd.add_argument("--msaf-boundaries-id",  default="sf",    dest="msaf_boundaries_id",
+                    help="MSAF boundary algorithm (default: sf)")
+    cd.add_argument("--msaf-labels-id",      default="fmc2d", dest="msaf_labels_id",
+                    help="MSAF labels algorithm (default: fmc2d)")
+    cd.add_argument("--confidence-warn",     type=float, default=0.45, dest="confidence_warn",
+                    help="Confidence below which a chord is flagged '?' (default: 0.45)")
+
     # ── Stem splitter ────────────────────────────────────────
     stems = p.add_argument_group("Stem splitter")
     stems.add_argument("--skip-stems",  action="store_true", help="Skip stem splitting")
@@ -120,6 +165,26 @@ Examples:
                        help="Demucs model (default: htdemucs_6s = 6 stems)")
     stems.add_argument("--session-type", default=None, dest="session_type",
                        help="Session instrument; mix all other stems into <input_base>_backing_track.wav")
+    # ── Demucs library knobs ──
+    dem = p.add_argument_group("Demucs (library knobs)")
+    dem.add_argument("--demucs-shifts",  type=int,   default=1,    dest="demucs_shifts")
+    dem.add_argument("--demucs-overlap", type=float, default=0.25, dest="demucs_overlap")
+    dem.add_argument("--demucs-jobs",    type=int,   default=0,    dest="demucs_jobs")
+    dem.add_argument("--demucs-segment", type=int,   default=0,    dest="demucs_segment")
+    dem.add_argument("--demucs-device",  default="auto", choices=("auto","cpu","cuda","mps"),
+                     dest="demucs_device")
+    dem.add_argument("--demucs-int24",   action="store_true", dest="demucs_int24")
+    dem.add_argument("--demucs-mp3",     action="store_true", dest="demucs_mp3")
+    # ── Stem presence detector knobs ──
+    pres = p.add_argument_group("Stem presence detector")
+    pres.add_argument("--presence-db",        type=float, default=-30.0, dest="presence_db")
+    pres.add_argument("--presence-window-s",  type=float, default=1.0,   dest="presence_window_s")
+    pres.add_argument("--presence-run-s",     type=float, default=2.0,   dest="presence_run_s")
+    # ── Backing-track mixer knobs ──
+    bt = p.add_argument_group("Backing track")
+    bt.add_argument("--backing-peak-dbfs",  type=float, default=-1.0, dest="backing_peak_dbfs")
+    bt.add_argument("--backing-bit-depth",  type=int,   default=24,   choices=(16,24,32),
+                    dest="backing_bit_depth")
 
     p.add_argument("--progress-json", action="store_true", dest="progress_json",
                    help="Emit machine-readable PROGRESS JSON lines on stdout, "
@@ -266,6 +331,21 @@ def main() -> None:
         if not args.trim_intro:     cmd += ["--no-trim-intro"]
         if args.beats_per_bar != 4: cmd += ["--beats-per-bar", str(args.beats_per_bar)]
         if args.allow_tempo_change: cmd += ["--allow-tempo-change"]
+        if args.intro_trim_bars != 1: cmd += ["--intro-trim-bars", str(args.intro_trim_bars)]
+        # Beat detector knobs
+        if args.detector_backend != "auto": cmd += ["--detector-backend", args.detector_backend]
+        if args.madmom_bpb_options != "3,4": cmd += ["--madmom-bpb-options", args.madmom_bpb_options]
+        if args.madmom_fps != 100: cmd += ["--madmom-fps", str(args.madmom_fps)]
+        if args.madmom_timeout_s != 240: cmd += ["--madmom-timeout-s", str(args.madmom_timeout_s)]
+        if args.librosa_start_bpm != 120.0: cmd += ["--librosa-start-bpm", str(args.librosa_start_bpm)]
+        if args.librosa_tightness != 100.0: cmd += ["--librosa-tightness", str(args.librosa_tightness)]
+        if args.librosa_hop_length != 512: cmd += ["--librosa-hop-length", str(args.librosa_hop_length)]
+        # Tempo-change guard knobs
+        if args.tempo_change_window_bars != 8: cmd += ["--tempo-change-window-bars", str(args.tempo_change_window_bars)]
+        if args.tempo_change_persist_bars != 4: cmd += ["--tempo-change-persist-bars", str(args.tempo_change_persist_bars)]
+        if args.tempo_change_threshold_pct != 0.06: cmd += ["--tempo-change-threshold-pct", str(args.tempo_change_threshold_pct)]
+        if args.tempo_change_threshold_floor != 6.0: cmd += ["--tempo-change-threshold-floor", str(args.tempo_change_threshold_floor)]
+        if args.pyrb_crispness is not None: cmd += ["--pyrb-crispness", str(args.pyrb_crispness)]
         if _PROGRESS_JSON:          cmd += ["--progress-json"]
         run_with_progress(
             cmd, "STEP 1 / 3  —  Beat Stabilization",
@@ -297,6 +377,16 @@ def main() -> None:
     if args.compound:                         cmd += ["--compound"]
     if args.skip_sections:                    cmd += ["--skip-sections"]
     if args.open:                             cmd += ["--open"]
+    # Chord-detection library knobs
+    if not args.bar_phase:                    cmd += ["--no-bar-phase"]
+    if args.msaf_boundaries_id != "sf":       cmd += ["--msaf-boundaries-id", args.msaf_boundaries_id]
+    if args.msaf_labels_id != "fmc2d":        cmd += ["--msaf-labels-id", args.msaf_labels_id]
+    if args.confidence_warn != 0.45:          cmd += ["--threshold", str(args.confidence_warn)]
+    # Beat-detector knobs (also used by chord_chart_render's own beat detection)
+    if args.ts_window_factor != 0.15:         cmd += ["--ts-window-factor", str(args.ts_window_factor)]
+    if args.librosa_start_bpm != 120.0:       cmd += ["--librosa-start-bpm", str(args.librosa_start_bpm)]
+    if args.librosa_tightness != 100.0:       cmd += ["--librosa-tightness", str(args.librosa_tightness)]
+    if args.librosa_hop_length != 512:        cmd += ["--librosa-hop-length", str(args.librosa_hop_length)]
     if _PROGRESS_JSON:                        cmd += ["--progress-json"]
     run_with_progress(
         cmd, "STEP 2 / 3  —  Chord Chart",
@@ -319,6 +409,21 @@ def main() -> None:
         if args.session_type:
             cmd += ["--session-type", args.session_type,
                     "--backing-track-out", backing_track_path]
+        # Demucs library knobs
+        if args.demucs_shifts != 1:     cmd += ["--demucs-shifts",  str(args.demucs_shifts)]
+        if args.demucs_overlap != 0.25: cmd += ["--demucs-overlap", str(args.demucs_overlap)]
+        if args.demucs_jobs > 0:        cmd += ["--demucs-jobs",    str(args.demucs_jobs)]
+        if args.demucs_segment > 0:     cmd += ["--demucs-segment", str(args.demucs_segment)]
+        if args.demucs_device != "auto": cmd += ["--demucs-device", args.demucs_device]
+        if args.demucs_int24:           cmd += ["--demucs-int24"]
+        if args.demucs_mp3:             cmd += ["--demucs-mp3"]
+        # Presence detector
+        if args.presence_db != -30.0:        cmd += ["--presence-db",        str(args.presence_db)]
+        if args.presence_window_s != 1.0:    cmd += ["--presence-window-s",  str(args.presence_window_s)]
+        if args.presence_run_s != 2.0:       cmd += ["--presence-run-s",     str(args.presence_run_s)]
+        # Backing track
+        if args.backing_peak_dbfs != -1.0:   cmd += ["--backing-peak-dbfs",  str(args.backing_peak_dbfs)]
+        if args.backing_bit_depth != 24:     cmd += ["--backing-bit-depth",  str(args.backing_bit_depth)]
         if _PROGRESS_JSON: cmd += ["--progress-json"]
         run_with_progress(
             cmd, "STEP 3 / 3  —  Stem Splitting",

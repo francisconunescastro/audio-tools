@@ -7,6 +7,16 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 // Advanced settings — behavioural knobs most users never need to touch.
 // AdvancedState carries the whole settings payload (including SongInfo fields)
 // because they share localStorage and submit together.
+//
+// Organised by pipeline stage:
+//   1. Beat Detection
+//   2. Beat Stabilizer
+//   3. Chord Detection
+//   4. Stem Splitting
+//
+// Each subsection has a Primary block (always visible inside the section) and
+// a "Library tuning" expand for the long-tail knobs that pass straight through
+// to the underlying library (madmom / librosa / pyrubberband / MSAF / demucs).
 // ---------------------------------------------------------------------------
 
 export type AdvancedState = {
@@ -20,14 +30,30 @@ export type AdvancedState = {
   timeSig: string;
   genre: string;
 
-  // Beat stabilizer
+  // Beat Detection
+  beatsPerBar: string;
+  detectorBackend: string;
+  madmomBpbOptions: string;
+  madmomFps: string;
+  madmomTimeoutS: string;
+  librosaStartBpm: string;
+  librosaTightness: string;
+  librosaHopLength: string;
+  tsWindowFactor: string;
+
+  // Beat Stabilizer
   strength: string;
   trimIntro: boolean;
-  beatsPerBar: string;
   skipStabilize: boolean;
   allowTempoChange: boolean;
+  introTrimBars: string;
+  tempoChangeWindowBars: string;
+  tempoChangePersistBars: string;
+  tempoChangeThresholdPct: string;
+  tempoChangeThresholdFloor: string;
+  pyrbCrispness: string;
 
-  // Chord chart
+  // Chord Detection
   barsPerLine: string;
   noBpm: boolean;
   noKey: boolean;
@@ -42,8 +68,12 @@ export type AdvancedState = {
   halfTime: boolean;
   compound: boolean;
   detectSections: boolean;
+  confidenceWarn: string;
+  barPhase: boolean;
+  msafBoundariesId: string;
+  msafLabelsId: string;
 
-  // Stems
+  // Stem Splitting
   skipStems: boolean;
   stemVocals: boolean;
   stemDrums: boolean;
@@ -52,6 +82,18 @@ export type AdvancedState = {
   stemPiano: boolean;
   stemOther: boolean;
   stemModel: string;
+  demucsShifts: string;
+  demucsOverlap: string;
+  demucsJobs: string;
+  demucsSegment: string;
+  demucsDevice: string;
+  demucsInt24: boolean;
+  demucsMp3: boolean;
+  presenceDb: string;
+  presenceWindowS: string;
+  presenceRunS: string;
+  backingPeakDbfs: string;
+  backingBitDepth: string;
 
   // Melody (lead sheets)
   quantizeMelody: boolean;
@@ -67,12 +109,30 @@ export const DEFAULT_ADVANCED: AdvancedState = {
   timeSig: "",
   genre: "auto",
 
+  // Beat Detection
+  beatsPerBar: "auto",
+  detectorBackend: "auto",
+  madmomBpbOptions: "3,4",
+  madmomFps: "100",
+  madmomTimeoutS: "240",
+  librosaStartBpm: "120",
+  librosaTightness: "100",
+  librosaHopLength: "512",
+  tsWindowFactor: "0.15",
+
+  // Beat Stabilizer
   strength: "1.0",
   trimIntro: true,
-  beatsPerBar: "auto",
   skipStabilize: false,
   allowTempoChange: false,
+  introTrimBars: "1",
+  tempoChangeWindowBars: "8",
+  tempoChangePersistBars: "4",
+  tempoChangeThresholdPct: "0.06",
+  tempoChangeThresholdFloor: "6",
+  pyrbCrispness: "",
 
+  // Chord Detection
   barsPerLine: "4",
   noBpm: false,
   noKey: false,
@@ -87,7 +147,12 @@ export const DEFAULT_ADVANCED: AdvancedState = {
   halfTime: false,
   compound: false,
   detectSections: false,
+  confidenceWarn: "0.45",
+  barPhase: true,
+  msafBoundariesId: "sf",
+  msafLabelsId: "fmc2d",
 
+  // Stem Splitting
   skipStems: false,
   stemVocals: true,
   stemDrums: true,
@@ -96,6 +161,18 @@ export const DEFAULT_ADVANCED: AdvancedState = {
   stemPiano: true,
   stemOther: true,
   stemModel: "htdemucs_6s",
+  demucsShifts: "1",
+  demucsOverlap: "0.25",
+  demucsJobs: "0",
+  demucsSegment: "0",
+  demucsDevice: "auto",
+  demucsInt24: false,
+  demucsMp3: false,
+  presenceDb: "-30",
+  presenceWindowS: "1.0",
+  presenceRunS: "2.0",
+  backingPeakDbfs: "-1.0",
+  backingBitDepth: "24",
 
   quantizeMelody: true,
 };
@@ -131,6 +208,40 @@ const STEM_MODEL_OPTIONS: Array<[string, string]> = [
   ["mdx_extra",   "mdx_extra — alternative"],
 ];
 
+const DETECTOR_BACKEND_OPTIONS: Array<[string, string]> = [
+  ["auto",    "Auto (madmom, then librosa)"],
+  ["madmom",  "Force madmom"],
+  ["librosa", "Force librosa"],
+];
+
+const MSAF_BOUNDARIES_OPTIONS: Array<[string, string]> = [
+  ["sf",       "sf — default"],
+  ["foote",    "foote"],
+  ["cnmf",     "cnmf"],
+  ["scluster", "scluster"],
+  ["vmo",      "vmo"],
+  ["olda",     "olda"],
+];
+
+const MSAF_LABELS_OPTIONS: Array<[string, string]> = [
+  ["fmc2d",    "fmc2d — default"],
+  ["cnmf",     "cnmf"],
+  ["scluster", "scluster"],
+];
+
+const DEMUCS_DEVICE_OPTIONS: Array<[string, string]> = [
+  ["auto", "Auto"],
+  ["cpu",  "CPU"],
+  ["cuda", "CUDA (NVIDIA GPU)"],
+  ["mps",  "MPS (Apple silicon)"],
+];
+
+const BACKING_BIT_DEPTH_OPTIONS: Array<[string, string]> = [
+  ["16", "16-bit"],
+  ["24", "24-bit — default"],
+  ["32", "32-bit float"],
+];
+
 type Props = {
   value: AdvancedState;
   onChange: (next: AdvancedState) => void;
@@ -164,12 +275,60 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
       </button>
 
       {open && (
-        <fieldset disabled={disabled} className="px-5 pb-6 space-y-8 border-t border-warm-100">
+        <fieldset disabled={disabled} className="px-5 pb-2 divide-y divide-warm-200 border-t border-warm-100">
 
-          {/* Beat stabilization */}
+          {/* ─── 1. Beat Detection ─── */}
           <Section
-            title="Beat stabilization"
-            intro="Warps the audio to an even tempo grid, then trims the intro to bar 1."
+            title="Beat Detection"
+            intro="Finds beats, downbeats, and the time signature in the source audio."
+          >
+            <Row>
+              <SelectField
+                label="Beats per bar"
+                value={value.beatsPerBar}
+                onChange={(v) => patch("beatsPerBar", v)}
+                options={BEATS_PER_BAR_OPTIONS}
+              />
+              <SelectField
+                label="Detector backend"
+                value={value.detectorBackend}
+                onChange={(v) => patch("detectorBackend", v)}
+                options={DETECTOR_BACKEND_OPTIONS}
+              />
+            </Row>
+            <Row>
+              <TextField
+                label="Candidate beats-per-bar (CSV)"
+                value={value.madmomBpbOptions}
+                onChange={(v) => patch("madmomBpbOptions", v)}
+                placeholder="3,4"
+              />
+            </Row>
+            <Hint>
+              Auto tries madmom first (better downbeats), then falls back to librosa. Forcing
+              one is useful when madmom mistracks or you need a faster run.
+            </Hint>
+
+            <LibraryKnobs label="Library tuning — madmom &amp; librosa">
+              <Row>
+                <NumberField label="madmom fps (Hz)"           value={value.madmomFps}          onChange={(v) => patch("madmomFps", v)} step="1" />
+                <NumberField label="madmom timeout (s)"        value={value.madmomTimeoutS}     onChange={(v) => patch("madmomTimeoutS", v)} step="10" />
+              </Row>
+              <Row>
+                <NumberField label="librosa start BPM"         value={value.librosaStartBpm}    onChange={(v) => patch("librosaStartBpm", v)} step="1" />
+                <NumberField label="librosa tightness"         value={value.librosaTightness}   onChange={(v) => patch("librosaTightness", v)} step="1" />
+                <NumberField label="librosa hop length"        value={value.librosaHopLength}   onChange={(v) => patch("librosaHopLength", v)} step="64" />
+              </Row>
+              <Row>
+                <NumberField label="Time-sig autocorr window"  value={value.tsWindowFactor}     onChange={(v) => patch("tsWindowFactor", v)} step="0.01" />
+              </Row>
+            </LibraryKnobs>
+          </Section>
+
+          {/* ─── 2. Beat Stabilizer ─── */}
+          <Section
+            title="Beat Stabilizer"
+            intro="Warps the audio so every beat lands on an even tempo grid, then trims the intro to bar 1."
           >
             <Row>
               <SelectField
@@ -178,16 +337,10 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
                 onChange={(v) => patch("strength", v)}
                 options={STRENGTH_OPTIONS}
               />
-              <SelectField
-                label="Beats per bar (intro trim)"
-                value={value.beatsPerBar}
-                onChange={(v) => patch("beatsPerBar", v)}
-                options={BEATS_PER_BAR_OPTIONS}
-              />
             </Row>
             <Row>
-              <Check label="Trim intro to one bar before beat 1" checked={value.trimIntro} onChange={(v) => patch("trimIntro", v)} />
-              <Check label="Skip stabilization entirely" checked={value.skipStabilize} onChange={(v) => patch("skipStabilize", v)} />
+              <Check label="Trim intro to one bar before beat 1" checked={value.trimIntro}        onChange={(v) => patch("trimIntro", v)} />
+              <Check label="Skip stabilization entirely"          checked={value.skipStabilize}    onChange={(v) => patch("skipStabilize", v)} />
             </Row>
             <Row>
               <Check
@@ -198,15 +351,49 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
             </Row>
             <Hint>
               By default, processing stops if a sustained tempo change is detected — a single-tempo
-              warp would mangle audio across the boundary. Enable this to proceed anyway.
+              warp would mangle audio across the boundary. Enable the guard override to proceed anyway.
             </Hint>
+
+            <LibraryKnobs label="Library tuning — intro trim, tempo guard, rubberband">
+              <Row>
+                <NumberField label="Intro trim (bars)" value={value.introTrimBars} onChange={(v) => patch("introTrimBars", v)} step="1" />
+                <NumberField label="rubberband crispness 0–6 (blank = library default)" value={value.pyrbCrispness} onChange={(v) => patch("pyrbCrispness", v)} step="1" />
+              </Row>
+              <Row>
+                <NumberField label="Tempo-change window (bars)"       value={value.tempoChangeWindowBars}    onChange={(v) => patch("tempoChangeWindowBars", v)} step="1" />
+                <NumberField label="Tempo-change persistence (bars)"  value={value.tempoChangePersistBars}   onChange={(v) => patch("tempoChangePersistBars", v)} step="1" />
+              </Row>
+              <Row>
+                <NumberField label="Tempo-change threshold (fraction)" value={value.tempoChangeThresholdPct}   onChange={(v) => patch("tempoChangeThresholdPct", v)} step="0.01" />
+                <NumberField label="Tempo-change minimum step (BPM)"   value={value.tempoChangeThresholdFloor} onChange={(v) => patch("tempoChangeThresholdFloor", v)} step="0.5" />
+              </Row>
+            </LibraryKnobs>
           </Section>
 
-          {/* Chord chart */}
+          {/* ─── 3. Chord Detection ─── */}
           <Section
-            title="Chord chart"
-            intro="Detects chords and renders a PDF + MusicXML lead sheet with section markers."
+            title="Chord Detection"
+            intro="Detects chords on the beat grid and renders a PDF + MusicXML lead sheet."
           >
+            <Row>
+              <Check label="Keep 7th qualities (maj7, m7, dom7)"     checked={value.add7th}          onChange={(v) => patch("add7th", v)} />
+              <Check label="Secondary model for low-confidence bars" checked={value.madmomFallback}  onChange={(v) => patch("madmomFallback", v)} />
+            </Row>
+            <Row>
+              <Check label="Refine key using chord frequencies" checked={value.keyTiebreak} onChange={(v) => patch("keyTiebreak", v)} />
+              <Check label="Snap out-of-key chords to diatonic" checked={value.keySnap}     onChange={(v) => patch("keySnap", v)} />
+            </Row>
+
+            <SubLabel>Rhythm overrides</SubLabel>
+            <Row>
+              <Check label="Force half-time"             checked={value.halfTime} onChange={(v) => patch("halfTime", v)} />
+              <Check label="Force 6/8 compound feel"     checked={value.compound} onChange={(v) => patch("compound", v)} />
+            </Row>
+            <Row>
+              <Check label="Detect song sections (A/B/C marks)" checked={value.detectSections} onChange={(v) => patch("detectSections", v)} />
+            </Row>
+
+            <SubLabel>Chart appearance</SubLabel>
             <Row>
               <SelectField
                 label="Bars per line"
@@ -215,49 +402,47 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
                 options={BARS_PER_LINE_OPTIONS}
               />
             </Row>
-
-            <SubLabel>Chart display</SubLabel>
             <Row>
               <Check label="Hide BPM"   checked={value.noBpm}   onChange={(v) => patch("noBpm", v)} />
               <Check label="Hide key"   checked={value.noKey}   onChange={(v) => patch("noKey", v)} />
               <Check label="Hide meter" checked={value.noMeter} onChange={(v) => patch("noMeter", v)} />
             </Row>
-
-            <SubLabel>Chord detection</SubLabel>
             <Row>
-              <Check label="Keep 7th qualities (maj7, m7, dom7)" checked={value.add7th}          onChange={(v) => patch("add7th", v)} />
-              <Check label="Secondary model for low-confidence bars"  checked={value.madmomFallback}   onChange={(v) => patch("madmomFallback", v)} />
-            </Row>
-            <Row>
-              <Check label="Refine key using chord frequencies" checked={value.keyTiebreak}      onChange={(v) => patch("keyTiebreak", v)} />
-              <Check label="Snap out-of-key chords to diatonic" checked={value.keySnap}          onChange={(v) => patch("keySnap", v)} />
+              <Check label="Quantize melody on lead sheets" checked={value.quantizeMelody} onChange={(v) => patch("quantizeMelody", v)} />
             </Row>
 
-            <SubLabel>Rhythm overrides</SubLabel>
-            <Row>
-              <Check label="Force half-time" checked={value.halfTime}     onChange={(v) => patch("halfTime", v)} />
-              <Check label="Force 6/8 compound feel" checked={value.compound}      onChange={(v) => patch("compound", v)} />
-            </Row>
-            <Row>
-              <Check label="Detect song sections (A/B/C marks)" checked={value.detectSections} onChange={(v) => patch("detectSections", v)} />
-            </Row>
-
-            {/* Expert threshold knobs */}
+            {/* Existing confidence thresholds */}
             <ExpertKnobs>
               <Row>
-                <NumberField label="Mid-bar split threshold (0–1)"   value={value.midBarThreshold}  onChange={(v) => patch("midBarThreshold", v)} />
-                <NumberField label="Madmom fallback threshold (0–1)" value={value.madmomThreshold}  onChange={(v) => patch("madmomThreshold", v)} />
-                <NumberField label="Key-snap threshold (0–1)"        value={value.keySnapThreshold} onChange={(v) => patch("keySnapThreshold", v)} />
+                <NumberField label="Mid-bar split threshold (0–1)"     value={value.midBarThreshold}   onChange={(v) => patch("midBarThreshold", v)} />
+                <NumberField label="Secondary-model threshold (0–1)"   value={value.madmomThreshold}   onChange={(v) => patch("madmomThreshold", v)} />
+                <NumberField label="Key-snap threshold (0–1)"          value={value.keySnapThreshold}  onChange={(v) => patch("keySnapThreshold", v)} />
               </Row>
               <Hint>
                 Confidence thresholds. Only adjust if the chart consistently misfires on your music.
               </Hint>
             </ExpertKnobs>
+
+            <LibraryKnobs label="Library tuning — confidence, MSAF, bar phase">
+              <Row>
+                <NumberField label="Low-confidence flag (0–1)" value={value.confidenceWarn} onChange={(v) => patch("confidenceWarn", v)} />
+                <Check label="Phase-align chord grid to bar downbeats" checked={value.barPhase} onChange={(v) => patch("barPhase", v)} />
+              </Row>
+              <Row>
+                <SelectField label="MSAF boundaries algorithm" value={value.msafBoundariesId} onChange={(v) => patch("msafBoundariesId", v)} options={MSAF_BOUNDARIES_OPTIONS} />
+                <SelectField label="MSAF labels algorithm"     value={value.msafLabelsId}     onChange={(v) => patch("msafLabelsId", v)}     options={MSAF_LABELS_OPTIONS} />
+              </Row>
+              <Hint>
+                MSAF picks out section boundaries (A / B / C marks). Different algorithms suit
+                different material — the defaults work for most pop & folk. Only matters when
+                &quot;Detect song sections&quot; is on.
+              </Hint>
+            </LibraryKnobs>
           </Section>
 
-          {/* Stems */}
+          {/* ─── 4. Stem Splitting ─── */}
           <Section
-            title="Stems"
+            title="Stem Splitting"
             intro="Splits the song into separate WAV tracks using Demucs."
           >
             <Row>
@@ -284,6 +469,35 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
             <Hint>
               All stems are produced regardless; unchecking one removes it from the ZIP only.
             </Hint>
+
+            <LibraryKnobs label="Library tuning — Demucs, presence detector, backing track">
+              <Row>
+                <NumberField label="Demucs shifts (more = better, slower)" value={value.demucsShifts}  onChange={(v) => patch("demucsShifts", v)} step="1" />
+                <NumberField label="Demucs overlap 0–0.99"                 value={value.demucsOverlap} onChange={(v) => patch("demucsOverlap", v)} step="0.05" />
+              </Row>
+              <Row>
+                <NumberField label="Demucs jobs (0 = auto)"                value={value.demucsJobs}    onChange={(v) => patch("demucsJobs", v)} step="1" />
+                <NumberField label="Demucs segment seconds (0 = full)"     value={value.demucsSegment} onChange={(v) => patch("demucsSegment", v)} step="1" />
+                <SelectField label="Demucs device"                         value={value.demucsDevice}  onChange={(v) => patch("demucsDevice", v)} options={DEMUCS_DEVICE_OPTIONS} />
+              </Row>
+              <Row>
+                <Check label="24-bit WAV stems" checked={value.demucsInt24} onChange={(v) => patch("demucsInt24", v)} />
+                <Check label="MP3 stems"        checked={value.demucsMp3}   onChange={(v) => patch("demucsMp3", v)} />
+              </Row>
+
+              <SubLabel>Stem presence detector</SubLabel>
+              <Row>
+                <NumberField label="Presence dBFS threshold"  value={value.presenceDb}      onChange={(v) => patch("presenceDb", v)} step="1" />
+                <NumberField label="Presence window (s)"      value={value.presenceWindowS} onChange={(v) => patch("presenceWindowS", v)} step="0.1" />
+                <NumberField label="Presence min run (s)"     value={value.presenceRunS}    onChange={(v) => patch("presenceRunS", v)} step="0.1" />
+              </Row>
+
+              <SubLabel>Backing track</SubLabel>
+              <Row>
+                <NumberField label="Peak ceiling (dBFS)"      value={value.backingPeakDbfs} onChange={(v) => patch("backingPeakDbfs", v)} step="0.5" />
+                <SelectField label="Bit depth"                value={value.backingBitDepth} onChange={(v) => patch("backingBitDepth", v)} options={BACKING_BIT_DEPTH_OPTIONS} />
+              </Row>
+            </LibraryKnobs>
           </Section>
 
         </fieldset>
@@ -296,9 +510,9 @@ export function AdvancedSettings({ value, onChange, disabled }: Props) {
 
 function Section({ title, intro, children }: { title: string; intro: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-3 pt-5">
+    <div className="space-y-4 py-6">
       <div className="space-y-1">
-        <p className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">{title}</p>
+        <p className="font-inter text-sm font-semibold uppercase tracking-[0.10em] text-ebony">{title}</p>
         <p className="font-inter text-xs text-[#6D6D6D] leading-relaxed">{intro}</p>
       </div>
       <div className="space-y-3">{children}</div>
@@ -339,16 +553,48 @@ function ExpertKnobs({ children }: { children: React.ReactNode }) {
   );
 }
 
+function LibraryKnobs({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="pt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="font-inter text-xs text-[#888888] hover:text-[#454545] flex items-center gap-1 transition-colors"
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {label}
+      </button>
+      {open && <div className="pt-3 space-y-3">{children}</div>}
+    </div>
+  );
+}
+
 // ---------- field primitives ----------
 
-function NumberField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function NumberField({ label, value, onChange, step }: { label: string; value: string; onChange: (v: string) => void; step?: string }) {
   return (
     <label className="flex flex-col gap-1 min-w-[160px] flex-1">
       <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">{label}</span>
       <input
         type="number"
-        step="0.05"
+        step={step ?? "0.05"}
         value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="font-season text-sm text-ebony bg-white border border-warm-200 px-2.5 py-2 outline-none focus:border-ebony transition-colors"
+      />
+    </label>
+  );
+}
+
+function TextField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <label className="flex flex-col gap-1 min-w-[160px] flex-1">
+      <span className="font-inter text-[10px] font-medium uppercase tracking-[0.12em] text-[#888888]">{label}</span>
+      <input
+        type="text"
+        value={value}
+        placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
         className="font-season text-sm text-ebony bg-white border border-warm-200 px-2.5 py-2 outline-none focus:border-ebony transition-colors"
       />
@@ -443,6 +689,44 @@ export function toSettingsPayload(a: AdvancedState) {
     stemModel:    a.stemModel,
     sessionType:  a.sessionType || undefined,
 
-    quantizeMelody: a.quantizeMelody ? undefined : false, // only send when off
+    quantizeMelody: a.quantizeMelody ? undefined : false,
+
+    // ── Beat-detector library knobs ──
+    detectorBackend:  a.detectorBackend && a.detectorBackend !== "auto" ? a.detectorBackend : undefined,
+    madmomBpbOptions: a.madmomBpbOptions && a.madmomBpbOptions !== "3,4" ? a.madmomBpbOptions : undefined,
+    madmomFps:        int(a.madmomFps),
+    madmomTimeoutS:   int(a.madmomTimeoutS),
+    librosaStartBpm:  num(a.librosaStartBpm),
+    librosaTightness: num(a.librosaTightness),
+    librosaHopLength: int(a.librosaHopLength),
+    tsWindowFactor:   num(a.tsWindowFactor),
+
+    // ── Beat-stabilizer library knobs ──
+    introTrimBars:                int(a.introTrimBars),
+    tempoChangeWindowBars:        int(a.tempoChangeWindowBars),
+    tempoChangePersistBars:       int(a.tempoChangePersistBars),
+    tempoChangeThresholdPct:      num(a.tempoChangeThresholdPct),
+    tempoChangeThresholdFloor:    num(a.tempoChangeThresholdFloor),
+    pyrbCrispness:                a.pyrbCrispness === "" ? undefined : int(a.pyrbCrispness),
+
+    // ── Chord-detection library knobs ──
+    barPhase:           a.barPhase ? undefined : false,
+    msafBoundariesId:   a.msafBoundariesId && a.msafBoundariesId !== "sf" ? a.msafBoundariesId : undefined,
+    msafLabelsId:       a.msafLabelsId     && a.msafLabelsId     !== "fmc2d" ? a.msafLabelsId : undefined,
+    confidenceWarn:     num(a.confidenceWarn),
+
+    // ── Stem-splitting library knobs ──
+    demucsShifts:      int(a.demucsShifts),
+    demucsOverlap:     num(a.demucsOverlap),
+    demucsJobs:        int(a.demucsJobs),
+    demucsSegment:     int(a.demucsSegment),
+    demucsDevice:      a.demucsDevice && a.demucsDevice !== "auto" ? a.demucsDevice : undefined,
+    demucsInt24:       a.demucsInt24 || undefined,
+    demucsMp3:         a.demucsMp3   || undefined,
+    presenceDb:        num(a.presenceDb),
+    presenceWindowS:   num(a.presenceWindowS),
+    presenceRunS:      num(a.presenceRunS),
+    backingPeakDbfs:   num(a.backingPeakDbfs),
+    backingBitDepth:   int(a.backingBitDepth),
   };
 }
